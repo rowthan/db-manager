@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 
 type MongoMeta = {
   ok: boolean
@@ -140,16 +141,18 @@ function prettyJson(value: unknown) {
 
 function getAvailableFields(result?: MongoQueryResult | null) {
   const docs = result?.list || []
-  if (result?.fields?.length) {
-    return result.fields
-  }
-
   const firstDoc = docs[0]
-  if (!firstDoc) {
-    return []
+  const fields = result?.fields?.length
+    ? [...result.fields]
+    : firstDoc
+      ? Object.keys(firstDoc)
+      : []
+
+  if (firstDoc && Object.prototype.hasOwnProperty.call(firstDoc, '_id') && !fields.includes('_id')) {
+    fields.unshift('_id')
   }
 
-  return Object.keys(firstDoc).filter((key) => key !== '_id')
+  return Array.from(new Set(fields))
 }
 
 function mergeFieldSettingsForView(
@@ -235,6 +238,7 @@ function moveFieldSetting(items: FieldSetting[], fromIndex: number, toIndex: num
 }
 
 function DatabasePageInner() {
+  const router = useRouter()
   const [meta, setMeta] = useState<MongoMeta | null>(null)
   const [loadingMeta, setLoadingMeta] = useState(false)
   const [loadingQuery, setLoadingQuery] = useState(false)
@@ -259,6 +263,7 @@ function DatabasePageInner() {
     doc: null,
   })
   const [mutatingDocument, setMutatingDocument] = useState(false)
+  const lastAutoQueryKeyRef = useRef('')
   const [form, setForm] = useState<QueryForm>({
     database: '',
     collection: '',
@@ -343,6 +348,21 @@ function DatabasePageInner() {
   }, [form.collection, form.database, hydratedSelection])
 
   useEffect(() => {
+    if (!hydratedSelection || !meta?.connected || !form.database || !form.collection) {
+      return
+    }
+
+    const autoQueryKey = `${form.database}::${form.collection}`
+    if (lastAutoQueryKeyRef.current === autoQueryKey) {
+      return
+    }
+
+    lastAutoQueryKeyRef.current = autoQueryKey
+    void executeQuery()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydratedSelection, meta?.connected, form.collection, form.database])
+
+  useEffect(() => {
     if (!form.database || !form.collection) {
       setCollectionConfig(null)
       setFieldDraft([])
@@ -403,7 +423,7 @@ function DatabasePageInner() {
         setForm((prev) => ({
           ...prev,
           database: database || data.database || prev.database,
-          collection: data.collections[0]?.name || prev.collection,
+          collection: database ? data.collections[0]?.name || prev.collection : prev.collection || data.collections[0]?.name || '',
           page: 0,
         }))
       }
@@ -417,6 +437,17 @@ function DatabasePageInner() {
       })
     } finally {
       setLoadingMeta(false)
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+      })
+    } finally {
+      router.replace('/signin')
+      router.refresh()
     }
   }
 
@@ -434,7 +465,7 @@ function DatabasePageInner() {
       }
       setCollectionConfig(data)
       setFieldDraft(buildFieldDraft(availableFields, data.fieldSettings || []))
-    } catch (error) {
+    } catch {
       setCollectionConfig({
         ok: false,
         database,
@@ -696,14 +727,20 @@ function DatabasePageInner() {
     void executeQuery(nextForm)
   }
 
-  function resetConditions() {
-    setForm((prev) => ({
-      ...prev,
+  function buildResetQueryForm(base: QueryForm): QueryForm {
+    return {
+      ...base,
       filterText: DEFAULT_FILTER,
       projectionText: DEFAULT_PROJECTION,
       sortText: DEFAULT_SORT,
       page: 0,
-    }))
+      pageSize: DEFAULT_PAGE_SIZE,
+      findOne: false,
+    }
+  }
+
+  function resetConditions() {
+    setForm((prev) => buildResetQueryForm(prev))
   }
 
   function openFieldModal() {
@@ -724,24 +761,32 @@ function DatabasePageInner() {
 
   return (
     <>
-      <div className="mx-auto max-w-7xl px-3 py-3 md:px-4 md:py-4">
+      <div className="mx-auto max-w-7xl px-2 py-2 sm:px-3 sm:py-3 md:px-4 md:py-4">
         <div className="grid gap-3 lg:grid-cols-[360px_minmax(0,1fr)]">
           <div className="space-y-3">
             <div className="rounded-2xl bg-base-200 p-3 shadow-lg md:p-4">
               <div className="flex flex-col gap-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0">
                     <h1 className="text-lg font-bold md:text-xl">数据库操作</h1>
                     <p className="mt-1 max-w-3xl text-xs text-base-content/70 md:text-sm">
                       这是一个独立页面，不挂在现有管理页里。通过环境变量配置 `MONGODB_URI` 后即可使用。
                     </p>
                   </div>
-                  <button
-                    className="btn btn-outline btn-sm"
-                    onClick={() => void loadMeta(form.database)}
-                  >
-                    {loadingMeta ? '刷新中...' : '刷新状态'}
-                  </button>
+                  <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row lg:shrink-0">
+                    <button
+                      className="btn btn-outline btn-sm w-full whitespace-nowrap sm:w-auto"
+                      onClick={() => void loadMeta(form.database)}
+                    >
+                      {loadingMeta ? '刷新中...' : '刷新状态'}
+                    </button>
+                    <button
+                      className="btn btn-outline btn-error btn-sm w-full whitespace-nowrap sm:w-auto"
+                      onClick={() => void handleLogout()}
+                    >
+                      退出登录
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-base-content/70">
@@ -772,14 +817,14 @@ function DatabasePageInner() {
                     value={form.database}
                     onChange={(e) => {
                       const database = e.target.value
+                      lastAutoQueryKeyRef.current = ''
                       setResult(null)
                       setQueryError('')
                       setCollectionFilter('')
                       setForm((prev) => ({
-                        ...prev,
+                        ...buildResetQueryForm(prev),
                         database,
                         collection: '',
-                        page: 0,
                       }))
                       void loadMeta(database)
                     }}
@@ -808,7 +853,7 @@ function DatabasePageInner() {
                     placeholder="搜索集合名"
                   />
 
-                  <div className="mt-2 max-h-64 overflow-auto rounded-xl border border-base-300 bg-base-100 p-1">
+                  <div className="mt-2 max-h-52 overflow-auto rounded-xl border border-base-300 bg-base-100 p-1 sm:max-h-64">
                     <label className="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 hover:bg-base-200">
                       <input
                         type="radio"
@@ -816,12 +861,12 @@ function DatabasePageInner() {
                         className="radio radio-sm"
                         checked={form.collection === ''}
                         onChange={() => {
+                          lastAutoQueryKeyRef.current = ''
                           setResult(null)
                           setQueryError('')
                           setForm((prev) => ({
-                            ...prev,
+                            ...buildResetQueryForm(prev),
                             collection: '',
-                            page: 0,
                           }))
                         }}
                       />
@@ -835,7 +880,7 @@ function DatabasePageInner() {
                       .map((item) => (
                         <label
                           key={item.name}
-                          className="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 hover:bg-base-200"
+                          className="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-1.5 hover:bg-base-200"
                         >
                           <input
                             type="radio"
@@ -843,12 +888,12 @@ function DatabasePageInner() {
                             className="radio radio-sm"
                             checked={form.collection === item.name}
                             onChange={() => {
+                              lastAutoQueryKeyRef.current = ''
                               setResult(null)
                               setQueryError('')
                               setForm((prev) => ({
-                                ...prev,
+                                ...buildResetQueryForm(prev),
                                 collection: item.name,
-                                page: 0,
                               }))
                             }}
                           />
@@ -972,11 +1017,11 @@ function DatabasePageInner() {
               </div>
 
               <div className="mt-2 flex flex-wrap gap-2">
-                <button className="btn btn-primary btn-sm min-h-8 h-8" onClick={() => void executeQuery()}>
+                <button className="btn btn-primary btn-sm min-h-8 h-8 w-full sm:w-auto" onClick={() => void executeQuery()}>
                   {loadingQuery ? '查询中...' : '执行查询'}
                 </button>
                 <button
-                  className="btn btn-outline btn-sm min-h-8 h-8"
+                  className="btn btn-outline btn-sm min-h-8 h-8 w-full sm:w-auto"
                   onClick={resetConditions}
                 >
                   重置条件
@@ -995,7 +1040,7 @@ function DatabasePageInner() {
                     />
                   </label>
                   <button
-                    className="btn btn-secondary btn-sm min-h-8 h-8"
+                    className="btn btn-secondary btn-sm min-h-8 h-8 w-full sm:w-auto"
                     onClick={() => void saveQueryPreset()}
                     disabled={!queryName.trim() || savingConfig}
                   >
@@ -1021,11 +1066,11 @@ function DatabasePageInner() {
               </div>
             </details>
 
-            <div className="rounded-2xl bg-base-200 p-4 shadow">
+            <div className="rounded-2xl bg-base-200 p-3 shadow md:p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                 <div>
                   <div className="flex items-center gap-3">
-                    <h2 className="text-lg font-semibold">查询结果</h2>
+                    <h2 className="text-base font-semibold md:text-lg">查询结果</h2>
                     <span className="text-xs text-base-content/50">
                       {visibleFields.length}/{availableFields.length || 0} 字段
                     </span>
@@ -1053,45 +1098,23 @@ function DatabasePageInner() {
                 </div>
               </div>
 
-              <div className="mt-3 overflow-auto rounded-xl border border-base-300 bg-base-100">
+              <div className="mt-3">
                 {docs.length ? (
-                  <table className="table table-zebra table-pin-rows min-w-max">
-                    <thead>
-                      <tr>
-                        <th className="w-14 normal-case">#</th>
-                        <th className="w-52 normal-case">_id</th>
-                        {visibleFields.length ? (
-                          visibleFields.map((field) => (
-                            <th key={field} className="min-w-40 whitespace-nowrap normal-case">
-                              {field}
-                            </th>
-                          ))
-                        ) : (
-                          <th className="normal-case">字段</th>
-                        )}
-                        <th className="sticky right-0 z-20 w-44 bg-base-200 text-center normal-case">
-                          操作
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
+                  <>
+                    <div className="space-y-3 md:hidden">
                       {docs.map((doc, index) => (
-                        <tr key={`${index}-${String(doc._id || index)}`}>
-                          <td>{index + 1}</td>
-                          <td className="break-all font-mono text-xs">{String(doc._id || '-')}</td>
-                          {visibleFields.length ? (
-                            visibleFields.map((field) => (
-                              <td key={field} className="align-top whitespace-pre-wrap break-words">
-                                {formatValue(readValueByPath(doc, field))}
-                              </td>
-                            ))
-                          ) : (
-                            <td className="text-sm text-base-content/50">
-                              没有可展示的字段，查看原始 JSON。
-                            </td>
-                          )}
-                          <td className="sticky right-0 z-10 w-44 bg-base-100 align-top">
-                            <div className="flex items-center justify-center gap-2 whitespace-nowrap px-1">
+                        <article
+                          key={`mobile-${index}-${String(doc._id || index)}`}
+                          className="rounded-xl border border-base-300 bg-base-100 p-3 shadow-sm"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-xs text-base-content/50">#{index + 1}</div>
+                              <div className="break-all font-mono text-xs text-base-content/70">
+                                {String(doc._id || '-')}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2">
                               <button
                                 className="btn btn-outline btn-xs"
                                 onClick={() => openEditDocument(doc)}
@@ -1105,11 +1128,89 @@ function DatabasePageInner() {
                                 删除
                               </button>
                             </div>
-                          </td>
-                        </tr>
+                          </div>
+
+                          <div className="mt-3 space-y-2">
+                            {visibleFields.length ? (
+                              visibleFields.map((field) => (
+                                <div
+                                  key={field}
+                                  className="grid grid-cols-[96px_minmax(0,1fr)] gap-2 rounded-lg bg-base-200/50 px-2 py-1.5"
+                                >
+                                  <div className="break-all text-xs font-medium text-base-content/60">
+                                    {field}
+                                  </div>
+                                  <div className="break-words text-sm">
+                                    {formatValue(readValueByPath(doc, field))}
+                                  </div>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="rounded-lg bg-base-200/50 px-2 py-2 text-sm text-base-content/50">
+                                没有可展示的字段，查看原始 JSON。
+                              </div>
+                            )}
+                          </div>
+                        </article>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+
+                    <div className="hidden overflow-auto rounded-xl border border-base-300 bg-base-100 md:block">
+                      <table className="table table-zebra table-pin-rows min-w-max">
+                        <thead>
+                          <tr>
+                            <th className="w-14 normal-case">#</th>
+                            {visibleFields.length ? (
+                              visibleFields.map((field) => (
+                                <th key={field} className="min-w-40 whitespace-nowrap normal-case">
+                                  {field}
+                                </th>
+                              ))
+                            ) : (
+                              <th className="normal-case">字段</th>
+                            )}
+                            <th className="sticky right-0 z-20 w-44 bg-base-200 text-center normal-case">
+                              操作
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {docs.map((doc, index) => (
+                            <tr key={`${index}-${String(doc._id || index)}`}>
+                              <td>{index + 1}</td>
+                              {visibleFields.length ? (
+                                visibleFields.map((field) => (
+                                  <td key={field} className="align-top whitespace-pre-wrap break-words">
+                                    {formatValue(readValueByPath(doc, field))}
+                                  </td>
+                                ))
+                              ) : (
+                                <td className="text-sm text-base-content/50">
+                                  没有可展示的字段，查看原始 JSON。
+                                </td>
+                              )}
+                              <td className="sticky right-0 z-10 w-44 bg-base-100 align-top">
+                                <div className="flex items-center justify-center gap-2 whitespace-nowrap px-1">
+                                  <button
+                                    className="btn btn-outline btn-xs"
+                                    onClick={() => openEditDocument(doc)}
+                                  >
+                                    编辑
+                                  </button>
+                                  <button
+                                    className="btn btn-error btn-outline btn-xs"
+                                    onClick={() => openDeleteDocument(doc)}
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 ) : (
                   <div className="py-10 text-center text-sm text-base-content/50">
                     {loadingQuery ? '正在查询...' : '没有结果或尚未查询'}

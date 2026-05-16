@@ -13,16 +13,22 @@ Standalone Next.js 16 app for MongoDB browsing and editing.
 1. Import this repository into Vercel as a Next.js project.
 2. Add `MONGODB_URI` in the Vercel project environment variables.
 3. Optionally add `MONGODB_DB` if you want a default database.
-4. Deploy.
+4. Add `DB_MANAGER_PASSWORD` and `DB_MANAGER_SESSION_SECRET` to enable login protection.
+5. Optionally set `DB_MANAGER_SESSION_TTL_SECONDS` to control session duration.
+6. Deploy.
 
 The MongoDB connection string is intentionally not committed to the repository.
+The login password is also kept in environment variables and is never committed.
 
 ## Run
 
 1. Copy `.env.example` to `.env.local`
 2. Set `MONGODB_URI`
 3. Optionally set `MONGODB_DB`
-4. Run `npm run dev`
+4. Set `DB_MANAGER_PASSWORD`
+5. Set `DB_MANAGER_SESSION_SECRET`
+6. Optionally set `DB_MANAGER_SESSION_TTL_SECONDS`
+7. Run `npm run dev`
 
 ## Features
 
