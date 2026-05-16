@@ -37,6 +37,7 @@ export function ResultViewSection({
   onSortField,
   onEditDocument,
   onDeleteDocument,
+  onExportDocuments,
   onBulkUpdateDocuments,
   onBulkDeleteDocuments,
   selectionResetVersion,
@@ -47,8 +48,8 @@ export function ResultViewSection({
   sortText,
 }: ResultViewProps) {
   const viewDocs = useMemo(() => (viewResult?.list || []) as QueryDoc[], [viewResult?.list])
-  const hasRowActions = Boolean(onEditDocument || onDeleteDocument)
-  const hasBulkActions = Boolean(onBulkUpdateDocuments || onBulkDeleteDocuments)
+  const hasRowActions = Boolean(onEditDocument || onDeleteDocument || onExportDocuments)
+  const hasBulkActions = Boolean(onBulkUpdateDocuments || onBulkDeleteDocuments || onExportDocuments)
   const [showAllFields, setShowAllFields] = useState(false)
   const [rawSelectedDocIds, setRawSelectedDocIds] = useState<Set<string>>(() => new Set())
   const selectAllRef = useRef<HTMLInputElement | null>(null)
@@ -188,6 +189,15 @@ export function ResultViewSection({
                   批量删除
                 </button>
               ) : null}
+              {onExportDocuments ? (
+                <button
+                  className="btn btn-secondary btn-outline btn-xs"
+                  onClick={() => onExportDocuments(selectedDocs)}
+                  disabled={!selectedCount}
+                >
+                  导出数据
+                </button>
+              ) : null}
             </div>
           ) : null}
           {queryError ? <div className="alert alert-error py-2 text-sm">{queryError}</div> : null}
@@ -232,6 +242,11 @@ export function ResultViewSection({
                         {onDeleteDocument ? (
                           <button className="btn btn-error btn-outline btn-xs" onClick={() => onDeleteDocument(doc)}>
                             删除
+                          </button>
+                        ) : null}
+                        {onExportDocuments ? (
+                          <button className="btn btn-secondary btn-outline btn-xs" onClick={() => onExportDocuments([doc])}>
+                            导出
                           </button>
                         ) : null}
                       </div>
@@ -308,9 +323,9 @@ export function ResultViewSection({
                     ) : (
                       <th className="normal-case">字段</th>
                     )}
-                    {hasRowActions ? (
-                      <th className="sticky right-0 z-20 w-44 bg-base-200 text-center normal-case">操作</th>
-                    ) : null}
+                      {hasRowActions ? (
+                        <th className="sticky right-0 z-20 w-60 bg-base-200 text-center normal-case">操作</th>
+                      ) : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -339,8 +354,8 @@ export function ResultViewSection({
                         <td className="text-sm text-base-content/50">没有可展示的字段，查看原始 JSON。</td>
                       )}
                       {hasRowActions ? (
-                        <td className="sticky right-0 z-10 w-44 bg-base-100 align-top">
-                          <div className="flex items-center justify-center gap-2 whitespace-nowrap px-1">
+                        <td className="sticky right-0 z-10 w-60 bg-base-100 align-top">
+                          <div className="flex flex-wrap items-center justify-center gap-2 whitespace-nowrap px-1">
                             {onEditDocument ? (
                               <button className="btn btn-outline btn-xs" onClick={() => onEditDocument(doc)}>
                                 编辑
@@ -349,6 +364,11 @@ export function ResultViewSection({
                             {onDeleteDocument ? (
                               <button className="btn btn-error btn-outline btn-xs" onClick={() => onDeleteDocument(doc)}>
                                 删除
+                              </button>
+                            ) : null}
+                            {onExportDocuments ? (
+                              <button className="btn btn-secondary btn-outline btn-xs" onClick={() => onExportDocuments([doc])}>
+                                导出
                               </button>
                             ) : null}
                           </div>

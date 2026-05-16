@@ -107,6 +107,20 @@ export type DeleteModalState = {
   collection: string
 }
 
+export type ExportModalState = {
+  open: boolean
+  docs: QueryDoc[]
+  database: string
+  collection: string
+  fieldRules: ExportFieldRule[]
+}
+
+export type ExportFieldRule = {
+  key: string
+  include: boolean
+  alias: string
+}
+
 export type CommonQueryPreset = {
   label: string
   description: string
@@ -177,6 +191,7 @@ export type ResultViewProps = {
   onSortField?: (field: string) => void
   onEditDocument?: (doc: QueryDoc) => void
   onDeleteDocument?: (doc: QueryDoc) => void
+  onExportDocuments?: (docs: QueryDoc[]) => void
   onBulkUpdateDocuments?: (docs: QueryDoc[]) => void
   onBulkDeleteDocuments?: (docs: QueryDoc[]) => void
   selectionResetVersion?: number

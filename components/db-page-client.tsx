@@ -15,6 +15,8 @@ import type {
   QueryDoc,
   DocumentModalState,
   DeleteModalState,
+  ExportModalState,
+  ExportFieldRule,
   DocumentEditMode,
   DocumentFieldDraft,
   CommonQueryPreset,
@@ -745,6 +747,45 @@ function getAvailableFields(result?: MongoQueryResult | null, settings: FieldSet
   return Array.from(new Set([...settingFields, ...fields]))
 }
 
+function getExportableFields(docs: QueryDoc[]) {
+  const fields: string[] = []
+  const seen = new Set<string>()
+
+  for (const doc of docs) {
+    for (const key of Object.keys(doc)) {
+      if (seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      fields.push(key)
+    }
+  }
+
+  return fields
+}
+
+function createExportFieldRules(docs: QueryDoc[], existingRules: ExportFieldRule[] = []) {
+  const fields = getExportableFields(docs)
+  const rulesByKey = new Map(existingRules.map((rule) => [rule.key, rule]))
+
+  return fields.map((field) => {
+    const existing = rulesByKey.get(field)
+    return {
+      key: field,
+      include: existing?.include ?? true,
+      alias: existing?.alias?.trim() || field,
+    }
+  })
+}
+
+function buildExportFileName(database: string, collection: string, count: number) {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const prefix = [database, collection].filter(Boolean).join('_') || 'export'
+  return `${prefix}-${count}rows-${stamp}.json`
+}
+
 function mergeFieldSettingsForView(
   availableFields: string[],
   settings: FieldSetting[]
@@ -890,6 +931,13 @@ function DatabasePageInner() {
     docs: [],
     database: '',
     collection: '',
+  })
+  const [exportModal, setExportModal] = useState<ExportModalState>({
+    open: false,
+    docs: [],
+    database: '',
+    collection: '',
+    fieldRules: [],
   })
   const [mutatingDocument, setMutatingDocument] = useState(false)
   const [resultSelectionResetVersion, setResultSelectionResetVersion] = useState(0)
@@ -1039,6 +1087,61 @@ function DatabasePageInner() {
     const pageSize = result?.pageSize || form.pageSize || 1
     return Math.max(1, Math.ceil(total / pageSize))
   }, [form.pageSize, result?.pageSize, result?.total])
+  const exportAvailableFields = useMemo(
+    () => getExportableFields(exportModal.docs),
+    [exportModal.docs]
+  )
+  const exportSelectedFieldRules = useMemo(
+    () => exportModal.fieldRules.filter((rule) => rule.include),
+    [exportModal.fieldRules]
+  )
+  const exportPreviewError = useMemo(() => {
+    const seen = new Set<string>()
+    const blankAliasCount = exportSelectedFieldRules.filter((rule) => !rule.alias.trim()).length
+
+    if (blankAliasCount > 0 && exportSelectedFieldRules.length > 1) {
+      return '导出名留空时仅支持单字段导出，请只保留一个字段或为其他字段填写导出名'
+    }
+
+    for (const rule of exportSelectedFieldRules) {
+      const alias = rule.alias.trim() || rule.key
+      if (seen.has(alias)) {
+        return `导出键 "${alias}" 重复，请为重命名后的字段使用不同名称`
+      }
+      seen.add(alias)
+    }
+    return ''
+  }, [exportSelectedFieldRules])
+  const exportPreviewData = useMemo(() => {
+    if (!exportModal.docs.length) {
+      return []
+    }
+
+    const singleRule = exportSelectedFieldRules[0]
+    if (singleRule && exportSelectedFieldRules.length === 1 && !singleRule.alias.trim()) {
+      return exportModal.docs.length === 1
+        ? exportModal.docs[0][singleRule.key]
+        : exportModal.docs.map((doc) => doc[singleRule.key])
+    }
+
+    const buildPayload = (doc: QueryDoc) => {
+      const output: Record<string, unknown> = {}
+      for (const rule of exportSelectedFieldRules) {
+        const exportKey = rule.alias.trim() || rule.key
+        if (Object.prototype.hasOwnProperty.call(doc, rule.key)) {
+          output[exportKey] = doc[rule.key]
+        }
+      }
+      return output
+    }
+
+    if (exportModal.docs.length === 1) {
+      return buildPayload(exportModal.docs[0])
+    }
+
+    return exportModal.docs.map((doc) => buildPayload(doc))
+  }, [exportModal.docs, exportSelectedFieldRules])
+  const exportPreviewText = useMemo(() => prettyJson(exportPreviewData), [exportPreviewData])
 
   useEffect(() => {
     if (fieldConfigOpen) {
@@ -1294,6 +1397,95 @@ function DatabasePageInner() {
       collection,
     })
     setDocumentTableDraft([])
+  }
+
+  function openExportDocuments(docs: QueryDoc[], database = form.database, collection = form.collection) {
+    if (!docs.length) {
+      setQueryError('请先选择至少一条记录')
+      return
+    }
+
+    setExportModal({
+      open: true,
+      docs,
+      database,
+      collection,
+      fieldRules: createExportFieldRules(docs),
+    })
+  }
+
+  function closeExportDocuments() {
+    setExportModal({
+      open: false,
+      docs: [],
+      database: '',
+      collection: '',
+      fieldRules: [],
+    })
+  }
+
+  function toggleExportField(field: string) {
+    setExportModal((prev) => {
+      return {
+        ...prev,
+        fieldRules: prev.fieldRules.map((rule) =>
+          rule.key === field ? { ...rule, include: !rule.include } : rule
+        ),
+      }
+    })
+  }
+
+  function selectAllExportFields() {
+    setExportModal((prev) => ({
+      ...prev,
+      fieldRules: prev.fieldRules.map((rule) => ({ ...rule, include: true })),
+    }))
+  }
+
+  function clearExportFields() {
+    setExportModal((prev) => ({
+      ...prev,
+      fieldRules: prev.fieldRules.map((rule) => ({ ...rule, include: false })),
+    }))
+  }
+
+  function updateExportFieldAlias(field: string, alias: string) {
+    setExportModal((prev) => ({
+      ...prev,
+      fieldRules: prev.fieldRules.map((rule) =>
+        rule.key === field ? { ...rule, alias } : rule
+      ),
+    }))
+  }
+
+  async function downloadExportDocuments() {
+    if (!exportModal.docs.length) {
+      setQueryError('请先选择至少一条记录')
+      return
+    }
+
+    if (exportPreviewError) {
+      setQueryError(exportPreviewError)
+      return
+    }
+
+    try {
+      const blob = new Blob([exportPreviewText], {
+        type: 'application/json;charset=utf-8',
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = buildExportFileName(exportModal.database, exportModal.collection, exportModal.docs.length)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => {
+        URL.revokeObjectURL(url)
+      }, 0)
+    } catch (error) {
+      setQueryError(error instanceof Error ? error.message : '导出失败')
+    }
   }
 
   function switchDocumentMode(nextMode: DocumentEditMode) {
@@ -2485,6 +2677,7 @@ function DatabasePageInner() {
               onSortField={toggleSortField}
               onEditDocument={(doc) => openEditDocument(doc, form.database, form.collection)}
               onDeleteDocument={(doc) => openDeleteDocument(doc, form.database, form.collection)}
+              onExportDocuments={(docs) => openExportDocuments(docs, form.database, form.collection)}
               onBulkUpdateDocuments={(docs) => openBulkUpdateDocuments(docs, form.database, form.collection)}
               onBulkDeleteDocuments={(docs) => openBulkDeleteDocuments(docs, form.database, form.collection)}
               selectionResetVersion={resultSelectionResetVersion}
@@ -3363,6 +3556,136 @@ function DatabasePageInner() {
                         ? '保存批量修改'
                       : '保存修改'}
                 </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {exportModal.open ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-300/70 p-4">
+            <div className="w-full max-w-5xl rounded-2xl bg-base-100 p-4 shadow-2xl">
+              <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
+                <div>
+                  <h3 className="text-lg font-semibold">导出数据</h3>
+                  <p className="text-sm text-base-content/60">
+                    选择要导出的字段，右侧会实时预览 JSON 内容。支持单条记录和多条记录导出。
+                  </p>
+                </div>
+                <button className="btn btn-ghost btn-sm" onClick={closeExportDocuments}>
+                  关闭
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+                <section className="rounded-2xl border border-base-300 bg-base-200 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">字段映射</div>
+                      <div className="text-xs text-base-content/50">
+                        已选 {exportSelectedFieldRules.length}/{exportAvailableFields.length} 个字段
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button className="btn btn-outline btn-xs" onClick={selectAllExportFields}>
+                        全选字段
+                      </button>
+                      <button className="btn btn-outline btn-xs" onClick={clearExportFields}>
+                        清空字段
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 max-h-[52vh] space-y-2 overflow-auto pr-1">
+                    {exportAvailableFields.length ? (
+                      exportModal.fieldRules.map((rule) => (
+                        <div
+                          key={rule.key}
+                          className="rounded-xl border border-base-300 bg-base-100 px-3 py-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="break-all font-mono text-sm">{rule.key}</div>
+                              <div className="text-xs text-base-content/50">原始字段名</div>
+                            </div>
+                            <label className="flex cursor-pointer items-center gap-2 text-sm">
+                              <span className="text-xs text-base-content/50">保留</span>
+                              <input
+                                type="checkbox"
+                                className="checkbox checkbox-primary checkbox-sm"
+                                checked={rule.include}
+                                onChange={() => toggleExportField(rule.key)}
+                              />
+                            </label>
+                          </div>
+
+                          <label className="mt-3 block">
+                            <div className="mb-1 text-xs text-base-content/50">导出名（留空则直接输出值）</div>
+                            <input
+                              className="input input-bordered input-sm w-full"
+                              value={rule.alias}
+                              onChange={(e) => updateExportFieldAlias(rule.key, e.target.value)}
+                              disabled={!rule.include}
+                              placeholder={rule.key}
+                            />
+                          </label>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-base-300 bg-base-100 p-6 text-center text-sm text-base-content/50">
+                        当前没有可导出的字段。
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-base-300 bg-base-200 p-4">
+                  <div className="flex flex-col gap-2 border-b border-base-300 pb-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">JSON 预览</div>
+                      <div className="text-xs text-base-content/50">
+                        {exportModal.docs.length === 1
+                          ? `单条记录 · ${exportModal.database || '-'}.${exportModal.collection || '-'}`
+                          : `多条记录 · 共 ${exportModal.docs.length} 条 · ${exportModal.database || '-'}.${
+                              exportModal.collection || '-'
+                            }`}
+                      </div>
+                    </div>
+                    <div className="text-xs text-base-content/50">
+                      导出文件会按当前预览内容生成
+                    </div>
+                  </div>
+
+                  {exportPreviewError ? (
+                    <div className="mt-4 alert alert-warning py-2 text-sm">
+                      {exportPreviewError}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-4">
+                    <div className="label-text text-sm">预览内容</div>
+                    <pre className="mt-2 max-h-[52vh] overflow-auto rounded-xl border border-base-300 bg-base-100 p-3 font-mono text-sm leading-6 whitespace-pre-wrap break-all">
+                      {exportPreviewText}
+                    </pre>
+                  </div>
+                </section>
+              </div>
+
+              <div className="mt-4 flex flex-wrap justify-between gap-2 border-t border-base-300 pt-3">
+                <div className="text-xs text-base-content/50">
+                  导出结果会根据所选字段过滤，并支持将字段名重命名后再导出；导出名留空时会直接输出该字段值。
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button className="btn btn-outline btn-sm" onClick={closeExportDocuments}>
+                    取消
+                  </button>
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => void downloadExportDocuments()}
+                    disabled={Boolean(exportPreviewError)}
+                  >
+                    导出 JSON
+                  </button>
+                </div>
               </div>
             </div>
           </div>
