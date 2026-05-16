@@ -113,12 +113,23 @@ export type ExportModalState = {
   database: string
   collection: string
   fieldRules: ExportFieldRule[]
+  fileNameBase: string
 }
 
 export type ExportFieldRule = {
   key: string
   include: boolean
   alias: string
+}
+
+export type CloudflarePublishResult = {
+  ok: boolean
+  url: string
+  objectKey: string
+  bucketName: string
+  domain: string
+  enabled: boolean
+  sizeBytes: number
 }
 
 export type CommonQueryPreset = {

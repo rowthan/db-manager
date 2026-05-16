@@ -7,5 +7,11 @@ export const metadata: Metadata = {
 }
 
 export default function DbPage() {
-  return <DbPageClient />
+  const cloudflarePublishConfigured = Boolean(
+    (process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CLOUDFLARE_R2_ACCOUNT_ID) &&
+      (process.env.CLOUDFLARE_R2_BUCKET || process.env.CLOUDFLARE_BUCKET_NAME) &&
+      (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_R2_API_TOKEN)
+  )
+
+  return <DbPageClient cloudflarePublishConfigured={cloudflarePublishConfigured} />
 }

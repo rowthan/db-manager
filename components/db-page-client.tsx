@@ -17,6 +17,7 @@ import type {
   DeleteModalState,
   ExportModalState,
   ExportFieldRule,
+  CloudflarePublishResult,
   DocumentEditMode,
   DocumentFieldDraft,
   CommonQueryPreset,
@@ -37,6 +38,10 @@ const DEFAULT_SORT = '{"createAt":-1}'
 const DEFAULT_PAGE_SIZE = 10
 const STORAGE_DATABASE_KEY = 'db-page:selected-database'
 const STORAGE_COLLECTION_KEY = 'db-page:selected-collection'
+
+type DatabasePageClientProps = {
+  cloudflarePublishConfigured?: boolean
+}
 
 function formatBytes(input?: number) {
   if (!input && input !== 0) return '-'
@@ -778,12 +783,46 @@ function createExportFieldRules(docs: QueryDoc[], existingRules: ExportFieldRule
   })
 }
 
-function buildExportFileName(database: string, collection: string, count: number) {
-  const now = new Date()
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  const prefix = [database, collection].filter(Boolean).join('_') || 'export'
-  return `${prefix}-${count}rows-${stamp}.json`
+function sanitizeExportFileNameBase(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return ''
+  }
+
+  return trimmed
+    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/_+/g, '_')
+    .replace(/^[_\-.]+|[_\-.]+$/g, '')
+}
+
+function getDefaultExportFileNameBase(docs: QueryDoc[]) {
+  const firstDoc = docs[0]
+  const rawKey = firstDoc?.key
+
+  if (typeof rawKey === 'string' && rawKey.trim()) {
+    return sanitizeExportFileNameBase(rawKey) || 'export'
+  }
+
+  if (rawKey !== undefined && rawKey !== null) {
+    const fallback = sanitizeExportFileNameBase(String(rawKey))
+    if (fallback) {
+      return fallback
+    }
+  }
+
+  return 'export'
+}
+
+function buildExportFileName(baseName: string, docs: QueryDoc[]) {
+  const normalizedBaseName = sanitizeExportFileNameBase(baseName) || getDefaultExportFileNameBase(docs)
+  return normalizedBaseName.toLowerCase().endsWith('.json')
+    ? normalizedBaseName
+    : `${normalizedBaseName}.json`
+}
+
+function buildExportObjectKey(baseName: string, docs: QueryDoc[]) {
+  return buildExportFileName(baseName, docs)
 }
 
 function mergeFieldSettingsForView(
@@ -873,7 +912,7 @@ function moveFieldSetting(items: FieldSetting[], fromIndex: number, toIndex: num
   return next
 }
 
-function DatabasePageInner() {
+function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePageClientProps) {
   const router = useRouter()
   const [meta, setMeta] = useState<MongoMeta | null>(null)
   const [loadingMeta, setLoadingMeta] = useState(false)
@@ -938,7 +977,11 @@ function DatabasePageInner() {
     database: '',
     collection: '',
     fieldRules: [],
+    fileNameBase: '',
   })
+  const [cloudflarePublishResult, setCloudflarePublishResult] = useState<CloudflarePublishResult | null>(null)
+  const [cloudflarePublishError, setCloudflarePublishError] = useState('')
+  const [cloudflarePublishing, setCloudflarePublishing] = useState(false)
   const [mutatingDocument, setMutatingDocument] = useState(false)
   const [resultSelectionResetVersion, setResultSelectionResetVersion] = useState(0)
   const lastAutoQueryKeyRef = useRef('')
@@ -1411,7 +1454,10 @@ function DatabasePageInner() {
       database,
       collection,
       fieldRules: createExportFieldRules(docs),
+      fileNameBase: getDefaultExportFileNameBase(docs),
     })
+    setCloudflarePublishResult(null)
+    setCloudflarePublishError('')
   }
 
   function closeExportDocuments() {
@@ -1421,7 +1467,10 @@ function DatabasePageInner() {
       database: '',
       collection: '',
       fieldRules: [],
+      fileNameBase: '',
     })
+    setCloudflarePublishError('')
+    setCloudflarePublishResult(null)
   }
 
   function toggleExportField(field: string) {
@@ -1458,6 +1507,21 @@ function DatabasePageInner() {
     }))
   }
 
+  function updateExportFileNameBase(fileNameBase: string) {
+    setExportModal((prev) => ({
+      ...prev,
+      fileNameBase,
+    }))
+  }
+
+  function copyCloudflarePublishUrl() {
+    if (!cloudflarePublishResult?.url || typeof navigator === 'undefined' || !navigator.clipboard) {
+      return
+    }
+
+    void navigator.clipboard.writeText(cloudflarePublishResult.url)
+  }
+
   async function downloadExportDocuments() {
     if (!exportModal.docs.length) {
       setQueryError('请先选择至少一条记录')
@@ -1476,7 +1540,7 @@ function DatabasePageInner() {
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = buildExportFileName(exportModal.database, exportModal.collection, exportModal.docs.length)
+      link.download = buildExportFileName(exportModal.fileNameBase, exportModal.docs)
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -1485,6 +1549,52 @@ function DatabasePageInner() {
       }, 0)
     } catch (error) {
       setQueryError(error instanceof Error ? error.message : '导出失败')
+    }
+  }
+
+  async function publishExportDocumentsToCloudflare() {
+    if (!exportModal.docs.length) {
+      setQueryError('请先选择至少一条记录')
+      return
+    }
+
+    if (exportPreviewError) {
+      setCloudflarePublishError(exportPreviewError)
+      return
+    }
+
+    if (!cloudflarePublishConfigured) {
+      setCloudflarePublishError('请先在服务端环境变量中配置 Cloudflare 发布参数')
+      return
+    }
+
+    setCloudflarePublishing(true)
+    setCloudflarePublishError('')
+    setCloudflarePublishResult(null)
+
+    try {
+      const response = await fetch('/api/db/export/cloudflare', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          objectKey: buildExportObjectKey(exportModal.fileNameBase, exportModal.docs),
+          jsonText: exportPreviewText,
+          enablePublicAccess: true,
+        }),
+      })
+
+      const data = (await response.json()) as CloudflarePublishResult & { error?: string }
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || '发布到 Cloudflare 失败')
+      }
+
+      setCloudflarePublishResult(data)
+    } catch (error) {
+      setCloudflarePublishError(error instanceof Error ? error.message : '发布到 Cloudflare 失败')
+    } finally {
+      setCloudflarePublishing(false)
     }
   }
 
@@ -3563,7 +3673,7 @@ function DatabasePageInner() {
 
         {exportModal.open ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-300/70 p-4">
-            <div className="w-full max-w-5xl rounded-2xl bg-base-100 p-4 shadow-2xl">
+            <div className="flex h-[90vh] max-h-[90vh] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-2xl bg-base-100 p-4 shadow-2xl">
               <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
                 <div>
                   <h3 className="text-lg font-semibold">导出数据</h3>
@@ -3576,107 +3686,189 @@ function DatabasePageInner() {
                 </button>
               </div>
 
-              <div className="mt-4 grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
-                <section className="rounded-2xl border border-base-300 bg-base-200 p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold">字段映射</div>
-                      <div className="text-xs text-base-content/50">
-                        已选 {exportSelectedFieldRules.length}/{exportAvailableFields.length} 个字段
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button className="btn btn-outline btn-xs" onClick={selectAllExportFields}>
-                        全选字段
-                      </button>
-                      <button className="btn btn-outline btn-xs" onClick={clearExportFields}>
-                        清空字段
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 max-h-[52vh] space-y-2 overflow-auto pr-1">
-                    {exportAvailableFields.length ? (
-                      exportModal.fieldRules.map((rule) => (
-                        <div
-                          key={rule.key}
-                          className="rounded-xl border border-base-300 bg-base-100 px-3 py-3"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="break-all font-mono text-sm">{rule.key}</div>
-                              <div className="text-xs text-base-content/50">原始字段名</div>
-                            </div>
-                            <label className="flex cursor-pointer items-center gap-2 text-sm">
-                              <span className="text-xs text-base-content/50">保留</span>
-                              <input
-                                type="checkbox"
-                                className="checkbox checkbox-primary checkbox-sm"
-                                checked={rule.include}
-                                onChange={() => toggleExportField(rule.key)}
-                              />
-                            </label>
+              <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                  <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+                    <section className="flex h-full min-h-0 flex-col rounded-2xl border border-base-300 bg-base-200 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold">字段映射</div>
+                          <div className="text-xs text-base-content/50">
+                            已选 {exportSelectedFieldRules.length}/{exportAvailableFields.length} 个字段
                           </div>
-
-                          <label className="mt-3 block">
-                            <div className="mb-1 text-xs text-base-content/50">导出名（留空则直接输出值）</div>
-                            <input
-                              className="input input-bordered input-sm w-full"
-                              value={rule.alias}
-                              onChange={(e) => updateExportFieldAlias(rule.key, e.target.value)}
-                              disabled={!rule.include}
-                              placeholder={rule.key}
-                            />
-                          </label>
                         </div>
-                      ))
-                    ) : (
-                      <div className="rounded-xl border border-dashed border-base-300 bg-base-100 p-6 text-center text-sm text-base-content/50">
-                        当前没有可导出的字段。
+                        <div className="flex flex-wrap gap-2">
+                          <button className="btn btn-outline btn-xs" onClick={selectAllExportFields}>
+                            全选字段
+                          </button>
+                          <button className="btn btn-outline btn-xs" onClick={clearExportFields}>
+                            清空字段
+                          </button>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </section>
 
-                <section className="rounded-2xl border border-base-300 bg-base-200 p-4">
-                  <div className="flex flex-col gap-2 border-b border-base-300 pb-3 md:flex-row md:items-center md:justify-between">
-                    <div>
-                      <div className="text-sm font-semibold">JSON 预览</div>
+                      <div className="mt-4 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                        {exportAvailableFields.length ? (
+                          exportModal.fieldRules.map((rule) => (
+                            <div
+                              key={rule.key}
+                              className="rounded-xl border border-base-300 bg-base-100 px-3 py-3"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="break-all font-mono text-sm">{rule.key}</div>
+                                  <div className="text-xs text-base-content/50">原始字段名</div>
+                                </div>
+                                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                                  <span className="text-xs text-base-content/50">保留</span>
+                                  <input
+                                    type="checkbox"
+                                    className="checkbox checkbox-primary checkbox-sm"
+                                    checked={rule.include}
+                                    onChange={() => toggleExportField(rule.key)}
+                                  />
+                                </label>
+                              </div>
+
+                              <label className="mt-3 block">
+                                <div className="mb-1 text-xs text-base-content/50">导出名（留空则直接输出值）</div>
+                                <input
+                                  className="input input-bordered input-sm w-full"
+                                  value={rule.alias}
+                                  onChange={(e) => updateExportFieldAlias(rule.key, e.target.value)}
+                                  disabled={!rule.include}
+                                  placeholder={rule.key}
+                                />
+                              </label>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-base-300 bg-base-100 p-6 text-center text-sm text-base-content/50">
+                            当前没有可导出的字段。
+                          </div>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className="flex h-full min-h-0 flex-col rounded-2xl border border-base-300 bg-base-200 p-4">
+                      <div className="flex flex-col gap-2 border-b border-base-300 pb-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="text-sm font-semibold">JSON 预览</div>
+                          <div className="text-xs text-base-content/50">
+                            {exportModal.docs.length === 1
+                              ? `单条记录 · ${exportModal.database || '-'}.${exportModal.collection || '-'}`
+                              : `多条记录 · 共 ${exportModal.docs.length} 条 · ${exportModal.database || '-'}.${
+                                  exportModal.collection || '-'
+                                }`}
+                          </div>
+                        </div>
+                        <div className="text-xs text-base-content/50">
+                          导出文件会按当前预览内容生成
+                        </div>
+                      </div>
+
+                      {exportPreviewError ? (
+                        <div className="mt-4 alert alert-warning py-2 text-sm">
+                          {exportPreviewError}
+                        </div>
+                      ) : null}
+
+                      <div className="mt-4 min-h-0 flex-1">
+                        <div className="label-text text-sm">预览内容</div>
+                        <pre className="mt-2 h-full max-h-full overflow-auto rounded-xl border border-base-300 bg-base-100 p-3 font-mono text-sm leading-6 whitespace-pre-wrap break-all">
+                          {exportPreviewText}
+                        </pre>
+                      </div>
+                    </section>
+                  </div>
+
+                  <section className="mt-4 rounded-2xl border border-base-300 bg-base-200 p-4">
+                    <div className="flex flex-col gap-2 border-b border-base-300 pb-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <div className="text-sm font-semibold">Cloudflare 发布</div>
+                        <div className="text-xs text-base-content/50">
+                          将当前预览内容上传到 R2，并返回可访问的 CDN 链接。
+                        </div>
+                      </div>
                       <div className="text-xs text-base-content/50">
-                        {exportModal.docs.length === 1
-                          ? `单条记录 · ${exportModal.database || '-'}.${exportModal.collection || '-'}`
-                          : `多条记录 · 共 ${exportModal.docs.length} 条 · ${exportModal.database || '-'}.${
-                              exportModal.collection || '-'
-                            }`}
+                        {cloudflarePublishConfigured ? '已从服务端环境变量读取配置' : '请先在服务端环境变量中配置 Cloudflare 发布参数'}
                       </div>
                     </div>
-                    <div className="text-xs text-base-content/50">
-                      导出文件会按当前预览内容生成
-                    </div>
-                  </div>
 
-                  {exportPreviewError ? (
-                    <div className="mt-4 alert alert-warning py-2 text-sm">
-                      {exportPreviewError}
+                    <div className="mt-3 rounded-xl border border-base-300 bg-base-100 p-3 text-sm text-base-content/70">
+                      Cloudflare 配置现在从环境变量读取，不需要在这里手动填写。
+                      <div className="mt-1 text-xs text-base-content/50">
+                        需要的变量包括 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_R2_BUCKET`、`CLOUDFLARE_API_TOKEN`
+                        ，可选 `CLOUDFLARE_R2_PUBLIC_BASE_URL`。
+                      </div>
                     </div>
-                  ) : null}
 
-                  <div className="mt-4">
-                    <div className="label-text text-sm">预览内容</div>
-                    <pre className="mt-2 max-h-[52vh] overflow-auto rounded-xl border border-base-300 bg-base-100 p-3 font-mono text-sm leading-6 whitespace-pre-wrap break-all">
-                      {exportPreviewText}
-                    </pre>
-                  </div>
-                </section>
+                    <div className="mt-3 rounded-xl border border-base-300 bg-base-100 p-3">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <div className="text-sm font-medium">发布文件名</div>
+                          <div className="text-xs text-base-content/50">
+                            默认取当前结果里的 `key` 值，可手动修改；会自动补上 `.json` 后缀。
+                          </div>
+                        </div>
+                        <div className="text-xs text-base-content/50">
+                          发布和下载共用同一文件名
+                        </div>
+                      </div>
+                      <label className="mt-3 block">
+                        <div className="mb-1 text-xs text-base-content/50">文件名</div>
+                        <input
+                          className="input input-bordered input-sm w-full"
+                          value={exportModal.fileNameBase}
+                          onChange={(e) => updateExportFileNameBase(e.target.value)}
+                          placeholder={getDefaultExportFileNameBase(exportModal.docs)}
+                        />
+                      </label>
+                    </div>
+
+                    {cloudflarePublishError ? (
+                      <div className="mt-3 alert alert-error py-2 text-sm">
+                        {cloudflarePublishError}
+                      </div>
+                    ) : null}
+
+                    {cloudflarePublishResult ? (
+                      <div className="mt-3 rounded-xl border border-success/30 bg-success/10 p-3 text-sm">
+                        <div className="font-medium text-success">发布成功</div>
+                        <div className="mt-1 break-all text-base-content/70">{cloudflarePublishResult.url}</div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <a className="btn btn-success btn-outline btn-xs" href={cloudflarePublishResult.url} target="_blank" rel="noreferrer">
+                            打开链接
+                          </a>
+                          <button className="btn btn-outline btn-xs" onClick={copyCloudflarePublishUrl}>
+                            复制链接
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </section>
+                </div>
               </div>
 
               <div className="mt-4 flex flex-wrap justify-between gap-2 border-t border-base-300 pt-3">
                 <div className="text-xs text-base-content/50">
                   导出结果会根据所选字段过滤，并支持将字段名重命名后再导出；导出名留空时会直接输出该字段值。
+                  发布到 Cloudflare 时可自定义文件名，默认使用当前记录的 `key` 值。
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button className="btn btn-outline btn-sm" onClick={closeExportDocuments}>
                     取消
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => void publishExportDocumentsToCloudflare()}
+                    disabled={
+                      cloudflarePublishing ||
+                      Boolean(exportPreviewError) ||
+                      !cloudflarePublishConfigured
+                    }
+                  >
+                    {cloudflarePublishing ? '发布中...' : '发布到 Cloudflare'}
                   </button>
                   <button
                     className="btn btn-primary btn-sm"
