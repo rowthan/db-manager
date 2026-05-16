@@ -81,6 +81,7 @@ export type CollectionConfig = {
 export type DocumentEditMode = 'json' | 'table'
 
 export type DocumentFieldDraft = {
+  id: string
   key: string
   type: 'string' | 'number' | 'boolean' | 'date' | 'object' | 'array' | 'null'
   valueText: string

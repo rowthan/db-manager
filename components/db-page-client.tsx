@@ -184,6 +184,14 @@ function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2)
 }
 
+function createDocumentFieldDraftId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+
+  return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 function isLikelyDateString(value: string) {
   if (!value) {
     return false
@@ -263,6 +271,7 @@ function buildDocumentFieldDraft(doc: Record<string, unknown> | null): DocumentF
       const type = inferDocumentFieldType(value, key)
       if (type === 'date' && typeof value === 'string') {
         return {
+          id: createDocumentFieldDraftId(),
           key,
           type,
           valueText: toDateTimeLocalValue(value),
@@ -271,6 +280,7 @@ function buildDocumentFieldDraft(doc: Record<string, unknown> | null): DocumentF
 
       if (type === 'object' || type === 'array') {
         return {
+          id: createDocumentFieldDraftId(),
           key,
           type,
           valueText: prettyJson(value),
@@ -279,6 +289,7 @@ function buildDocumentFieldDraft(doc: Record<string, unknown> | null): DocumentF
 
       if (type === 'boolean') {
         return {
+          id: createDocumentFieldDraftId(),
           key,
           type,
           valueText: String(Boolean(value)),
@@ -287,6 +298,7 @@ function buildDocumentFieldDraft(doc: Record<string, unknown> | null): DocumentF
 
       if (type === 'null') {
         return {
+          id: createDocumentFieldDraftId(),
           key,
           type,
           valueText: '',
@@ -294,6 +306,7 @@ function buildDocumentFieldDraft(doc: Record<string, unknown> | null): DocumentF
       }
 
       return {
+        id: createDocumentFieldDraftId(),
         key,
         type,
         valueText: String(value ?? ''),
@@ -311,6 +324,7 @@ function buildCreateDocumentFieldDraft(
   if (!keys.length) {
     return [
       {
+        id: createDocumentFieldDraftId(),
         key: '',
         type: 'string',
         valueText: '',
@@ -325,6 +339,7 @@ function buildCreateDocumentFieldDraft(
 
     if (type === 'boolean') {
       return {
+        id: createDocumentFieldDraftId(),
         key,
         type,
         valueText: 'false',
@@ -333,6 +348,7 @@ function buildCreateDocumentFieldDraft(
 
     if (type === 'date') {
       return {
+        id: createDocumentFieldDraftId(),
         key,
         type,
         valueText: '',
@@ -341,6 +357,7 @@ function buildCreateDocumentFieldDraft(
 
     if (type === 'object') {
       return {
+        id: createDocumentFieldDraftId(),
         key,
         type,
         valueText: '{}',
@@ -349,6 +366,7 @@ function buildCreateDocumentFieldDraft(
 
     if (type === 'array') {
       return {
+        id: createDocumentFieldDraftId(),
         key,
         type,
         valueText: '[]',
@@ -357,6 +375,7 @@ function buildCreateDocumentFieldDraft(
 
     if (type === 'number') {
       return {
+        id: createDocumentFieldDraftId(),
         key,
         type,
         valueText: '',
@@ -364,6 +383,7 @@ function buildCreateDocumentFieldDraft(
     }
 
     return {
+      id: createDocumentFieldDraftId(),
       key,
       type: 'string',
       valueText: firstEnum,
@@ -1293,6 +1313,7 @@ function DatabasePageInner() {
     setDocumentTableDraft((prev) => [
       ...prev,
       {
+        id: createDocumentFieldDraftId(),
         key: '',
         type: 'string',
         valueText: '',
@@ -2486,12 +2507,7 @@ function DatabasePageInner() {
                           aria-label={`将 ${item.key} 置顶`}
                           disabled={index === 0}
                           onClick={() =>
-                            setFieldDraft((prev) => {
-                              if (index <= 0) return prev
-                              const next = [...prev]
-                              ;[next[index - 1], next[index]] = [next[index], next[index - 1]]
-                              return next
-                            })
+                            setFieldDraft((prev) => moveFieldSetting(prev, index, 0))
                           }
                         >
                           <span aria-hidden="true" className="text-sm leading-none">
@@ -3021,7 +3037,7 @@ function DatabasePageInner() {
                       {documentTableDraft.length ? (
                         documentTableDraft.map((item, index) => (
                           <div
-                            key={`${item.key}-${index}`}
+                            key={item.id}
                             className="grid gap-2 rounded-xl border border-base-300 bg-base-200 p-3 md:grid-cols-[120px_minmax(0,1fr)_1fr_auto]"
                           >
                             <div className="flex items-center gap-2">
