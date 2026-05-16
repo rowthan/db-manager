@@ -876,6 +876,7 @@ function DatabasePageInner() {
     open: false,
     action: 'edit',
     doc: null,
+    docs: [],
     text: '',
     error: '',
     mode: 'json',
@@ -886,10 +887,12 @@ function DatabasePageInner() {
   const [deleteModal, setDeleteModal] = useState<DeleteModalState>({
     open: false,
     doc: null,
+    docs: [],
     database: '',
     collection: '',
   })
   const [mutatingDocument, setMutatingDocument] = useState(false)
+  const [resultSelectionResetVersion, setResultSelectionResetVersion] = useState(0)
   const lastAutoQueryKeyRef = useRef('')
   const [form, setForm] = useState<QueryForm>({
     database: '',
@@ -1220,6 +1223,7 @@ function DatabasePageInner() {
       open: true,
       action: 'edit',
       doc,
+      docs: [doc],
       text: prettyJson(doc),
       error: '',
       mode: 'json',
@@ -1247,6 +1251,7 @@ function DatabasePageInner() {
       open: true,
       action: 'create',
       doc: null,
+      docs: [],
       text,
       error: '',
       mode: 'table',
@@ -1261,11 +1266,32 @@ function DatabasePageInner() {
       open: false,
       action: 'edit',
       doc: null,
+      docs: [],
       text: '',
       error: '',
       mode: 'json',
       database: '',
       collection: '',
+    })
+    setDocumentTableDraft([])
+  }
+
+  function openBulkUpdateDocuments(docs: QueryDoc[], database = form.database, collection = form.collection) {
+    if (!docs.length) {
+      setQueryError('请先选择至少一条记录')
+      return
+    }
+
+    setDocumentModal({
+      open: true,
+      action: 'bulk',
+      doc: null,
+      docs,
+      text: '{}',
+      error: '',
+      mode: 'json',
+      database,
+      collection,
     })
     setDocumentTableDraft([])
   }
@@ -1329,6 +1355,22 @@ function DatabasePageInner() {
     setDeleteModal({
       open: true,
       doc,
+      docs: [doc],
+      database,
+      collection,
+    })
+  }
+
+  function openBulkDeleteDocuments(docs: QueryDoc[], database = form.database, collection = form.collection) {
+    if (!docs.length) {
+      setQueryError('请先选择至少一条记录')
+      return
+    }
+
+    setDeleteModal({
+      open: true,
+      doc: docs[0] || null,
+      docs,
       database,
       collection,
     })
@@ -1338,6 +1380,7 @@ function DatabasePageInner() {
     setDeleteModal({
       open: false,
       doc: null,
+      docs: [],
       database: '',
       collection: '',
     })
@@ -1367,9 +1410,59 @@ function DatabasePageInner() {
         documentPayload = parseMongoDocumentJson(documentModal.text)
       }
 
-      const requiredError = validateDocumentPayloadWithSettings(documentPayload, fieldSettings)
-      if (requiredError) {
-        throw new Error(requiredError)
+      if (documentModal.action === 'bulk' && !Object.keys(documentPayload).length) {
+        throw new Error('请至少填写一个字段')
+      }
+
+      if (documentModal.action !== 'bulk') {
+        const requiredError = validateDocumentPayloadWithSettings(documentPayload, fieldSettings)
+        if (requiredError) {
+          throw new Error(requiredError)
+        }
+      }
+
+      if (documentModal.action === 'bulk') {
+        const docs = documentModal.docs.filter((doc) => doc && doc._id !== undefined && doc._id !== null)
+        if (!docs.length) {
+          throw new Error('未找到可批量更新的记录')
+        }
+
+        const results = await Promise.allSettled(
+          docs.map(async (doc) => {
+            const response = await fetch('/api/db/document', {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                database: documentModal.database.trim(),
+                collection: documentModal.collection.trim(),
+                _id: doc._id,
+                document: {
+                  ...documentPayload,
+                  _id: doc._id,
+                },
+              }),
+            })
+
+            const data = (await response.json()) as { ok?: boolean; error?: string }
+            if (!response.ok || !data.ok) {
+              throw new Error(data.error || '保存失败')
+            }
+            return data
+          })
+        )
+
+        const failed = results.filter((item) => item.status === 'rejected') as PromiseRejectedResult[]
+        if (!failed.length) {
+          closeEditDocument()
+          setResultSelectionResetVersion((version) => version + 1)
+          await executeQuery()
+          return
+        }
+
+        await executeQuery()
+        throw new Error(`批量更新完成，但有 ${failed.length} 条失败：${failed[0]?.reason instanceof Error ? failed[0].reason.message : '保存失败'}`)
       }
 
       const method = documentModal.action === 'create' ? 'POST' : 'PUT'
@@ -1404,6 +1497,7 @@ function DatabasePageInner() {
       }
 
       closeEditDocument()
+      setResultSelectionResetVersion((version) => version + 1)
       await executeQuery()
     } catch (error) {
       setDocumentModal((prev) => ({
@@ -1416,31 +1510,46 @@ function DatabasePageInner() {
   }
 
   async function confirmDeleteDocument() {
-    if (!deleteModal.database || !deleteModal.collection || !deleteModal.doc?._id) {
+    if (!deleteModal.database || !deleteModal.collection || !deleteModal.docs.length) {
       return
     }
 
     setMutatingDocument(true)
     try {
-      const response = await fetch('/api/db/document', {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          database: deleteModal.database.trim(),
-          collection: deleteModal.collection.trim(),
-          _id: deleteModal.doc._id,
-        }),
-      })
-
-      const data = (await response.json()) as { ok?: boolean; error?: string }
-      if (!response.ok || !data.ok) {
-        throw new Error(data.error || '删除失败')
+      const docs = deleteModal.docs.filter((doc) => doc && doc._id !== undefined && doc._id !== null)
+      if (!docs.length) {
+        throw new Error('未找到可删除的记录')
       }
 
+      const results = await Promise.allSettled(
+        docs.map(async (doc) => {
+          const response = await fetch('/api/db/document', {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              database: deleteModal.database.trim(),
+              collection: deleteModal.collection.trim(),
+              _id: doc._id,
+            }),
+          })
+
+          const data = (await response.json()) as { ok?: boolean; error?: string }
+          if (!response.ok || !data.ok) {
+            throw new Error(data.error || '删除失败')
+          }
+          return data
+        })
+      )
+
+      const failed = results.filter((item) => item.status === 'rejected') as PromiseRejectedResult[]
       closeDeleteDocument()
+      setResultSelectionResetVersion((version) => version + 1)
       await executeQuery()
+      if (failed.length) {
+        throw new Error(`批量删除完成，但有 ${failed.length} 条失败：${failed[0]?.reason instanceof Error ? failed[0].reason.message : '删除失败'}`)
+      }
     } catch (error) {
       setQueryError(error instanceof Error ? error.message : '删除失败')
     } finally {
@@ -2008,6 +2117,30 @@ function DatabasePageInner() {
   const foreignLookupSections = buildForeignLookupSections()
   const savedQueries = collectionConfig?.savedQueries || []
   const commonQueryPresets = buildCommonQueryPresets()
+  const documentModalTitle =
+    documentModal.action === 'create'
+      ? '添加数据'
+      : documentModal.action === 'bulk'
+        ? '批量更新'
+        : '编辑文档'
+  const documentModalDescription =
+    documentModal.action === 'create'
+      ? '支持 JSON 或表格两种录入方式，新增后会直接写入当前集合。'
+      : documentModal.action === 'bulk'
+        ? `对已选择 ${documentModal.docs.length} 条记录应用相同修改，未填写字段不会被修改。`
+        : '_id 保持不变，支持 JSON 或表格两种编辑模式。'
+  const documentModalIdSummary =
+    documentModal.action === 'create'
+      ? '自动生成（也可在 JSON 中手动填写）'
+      : documentModal.action === 'bulk'
+        ? `${documentModal.docs.length} 条记录将同时更新`
+        : String(documentModal.doc?._id ?? '-')
+  const deleteModalTitle =
+    deleteModal.docs.length > 1 ? '批量删除确认' : '删除确认'
+  const deleteModalDescription =
+    deleteModal.docs.length > 1
+      ? `已选择 ${deleteModal.docs.length} 条记录，删除后无法恢复，请再次确认。`
+      : '删除后无法恢复，请再次确认。'
 
   return (
     <>
@@ -2352,6 +2485,9 @@ function DatabasePageInner() {
               onSortField={toggleSortField}
               onEditDocument={(doc) => openEditDocument(doc, form.database, form.collection)}
               onDeleteDocument={(doc) => openDeleteDocument(doc, form.database, form.collection)}
+              onBulkUpdateDocuments={(docs) => openBulkUpdateDocuments(docs, form.database, form.collection)}
+              onBulkDeleteDocuments={(docs) => openBulkDeleteDocuments(docs, form.database, form.collection)}
+              selectionResetVersion={resultSelectionResetVersion}
               renderField={renderFieldDisplay}
               footer={
                 <div className="mt-3 flex flex-col gap-3 border-t border-base-300 pt-3 md:flex-row md:items-center md:justify-between">
@@ -2953,14 +3089,8 @@ function DatabasePageInner() {
             <div className="w-full max-w-3xl rounded-2xl bg-base-100 p-4 shadow-2xl">
               <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
                 <div>
-                  <h3 className="text-lg font-semibold">
-                    {documentModal.action === 'create' ? '添加数据' : '编辑文档'}
-                  </h3>
-                  <p className="text-sm text-base-content/60">
-                    {documentModal.action === 'create'
-                      ? '支持 JSON 或表格两种录入方式，新增后会直接写入当前集合。'
-                      : '_id 保持不变，支持 JSON 或表格两种编辑模式。'}
-                  </p>
+                  <h3 className="text-lg font-semibold">{documentModalTitle}</h3>
+                  <p className="text-sm text-base-content/60">{documentModalDescription}</p>
                 </div>
                 <button className="btn btn-ghost btn-sm" onClick={closeEditDocument}>
                   关闭
@@ -2978,12 +3108,24 @@ function DatabasePageInner() {
                     <div className="font-medium">{form.collection || '-'}</div>
                   </div>
                   <div className="md:col-span-2">
-                    <div className="text-base-content/50">_id</div>
-                    <div className="break-all font-mono text-xs">
-                      {documentModal.action === 'create'
-                        ? '自动生成（也可在 JSON 中手动填写）'
-                        : String(documentModal.doc?._id || '-')}
+                    <div className="text-base-content/50">
+                      {documentModal.action === 'bulk' ? '已选记录' : '_id'}
                     </div>
+                    {documentModal.action === 'bulk' ? (
+                      <div className="mt-1 max-h-24 space-y-1 overflow-auto rounded-lg bg-base-100 p-2 font-mono text-xs">
+                        {documentModal.docs.length ? (
+                          documentModal.docs.map((doc, index) => (
+                            <div key={`${String(doc._id ?? index)}`} className="break-all">
+                              {String(doc._id ?? '-')}
+                            </div>
+                          ))
+                        ) : (
+                          <div>-</div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="break-all font-mono text-xs">{documentModalIdSummary}</div>
+                    )}
                   </div>
                 </div>
 
@@ -3030,6 +3172,10 @@ function DatabasePageInner() {
                       {documentModal.action === 'create' ? (
                         <span className="text-xs text-base-content/50">
                           新增时可先录入基础字段，再保存到当前集合。
+                        </span>
+                      ) : documentModal.action === 'bulk' ? (
+                        <span className="text-xs text-base-content/50">
+                          这里填写的是要写入所有已选记录的字段，未填写字段不会被修改。
                         </span>
                       ) : null}
                     </div>
@@ -3213,6 +3359,8 @@ function DatabasePageInner() {
                     ? '保存中...'
                     : documentModal.action === 'create'
                       ? '新增数据'
+                      : documentModal.action === 'bulk'
+                        ? '保存批量修改'
                       : '保存修改'}
                 </button>
               </div>
@@ -3225,10 +3373,8 @@ function DatabasePageInner() {
             <div className="w-full max-w-xl rounded-2xl bg-base-100 p-4 shadow-2xl">
               <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
                 <div>
-                  <h3 className="text-lg font-semibold">删除确认</h3>
-                  <p className="text-sm text-base-content/60">
-                    删除后无法恢复，请再次确认。
-                  </p>
+                  <h3 className="text-lg font-semibold">{deleteModalTitle}</h3>
+                  <p className="text-sm text-base-content/60">{deleteModalDescription}</p>
                 </div>
                 <button className="btn btn-ghost btn-sm" onClick={closeDeleteDocument}>
                   关闭
@@ -3237,13 +3383,27 @@ function DatabasePageInner() {
 
               <div className="mt-3 space-y-3">
                 <div className="rounded-xl border border-error/30 bg-error/5 p-3 text-sm">
-                  <div className="text-base-content/50">_id</div>
-                  <div className="break-all font-mono text-xs">
-                    {String(deleteModal.doc?._id || '-')}
+                  <div className="text-base-content/50">
+                    {deleteModal.docs.length > 1 ? '已选记录' : '_id'}
                   </div>
+                  {deleteModal.docs.length > 1 ? (
+                    <div className="mt-2 max-h-32 space-y-1 overflow-auto rounded-lg bg-base-100 p-2 font-mono text-xs">
+                      {deleteModal.docs.map((doc, index) => (
+                        <div key={`${String(doc._id ?? index)}`} className="break-all">
+                          {String(doc._id ?? '-')}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="break-all font-mono text-xs">
+                      {String(deleteModal.doc?._id ?? '-')}
+                    </div>
+                  )}
                 </div>
                 <div className="text-sm text-base-content/60">
-                  这条记录将被永久删除。你可以先取消，再回去检查一下条件是否正确。
+                  {deleteModal.docs.length > 1
+                    ? '这些记录将被永久删除。你可以先取消，再回去检查一下选择是否正确。'
+                    : '这条记录将被永久删除。你可以先取消，再回去检查一下条件是否正确。'}
                 </div>
               </div>
 

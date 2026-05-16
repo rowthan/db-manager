@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ResultViewProps, QueryDoc } from './types'
 
 function parseSortMap(text?: string) {
@@ -37,6 +37,9 @@ export function ResultViewSection({
   onSortField,
   onEditDocument,
   onDeleteDocument,
+  onBulkUpdateDocuments,
+  onBulkDeleteDocuments,
+  selectionResetVersion,
   renderField,
   footer,
   emptyLabel = '没有结果或尚未查询',
@@ -45,10 +48,83 @@ export function ResultViewSection({
 }: ResultViewProps) {
   const viewDocs = useMemo(() => (viewResult?.list || []) as QueryDoc[], [viewResult?.list])
   const hasRowActions = Boolean(onEditDocument || onDeleteDocument)
+  const hasBulkActions = Boolean(onBulkUpdateDocuments || onBulkDeleteDocuments)
   const [showAllFields, setShowAllFields] = useState(false)
+  const [rawSelectedDocIds, setRawSelectedDocIds] = useState<Set<string>>(() => new Set())
+  const selectAllRef = useRef<HTMLInputElement | null>(null)
   const displayFields = showAllFields ? viewAvailableFields : viewVisibleFields
   const fieldToggleLabel = showAllFields ? '收起字段' : '全部字段'
   const sortMap = useMemo(() => parseSortMap(sortText), [sortText])
+
+  const visibleDocIds = useMemo(
+    () =>
+      viewDocs
+        .map((doc) => String(doc._id ?? ''))
+        .filter((id) => Boolean(id)),
+    [viewDocs]
+  )
+  const visibleDocIdSet = useMemo(() => new Set(visibleDocIds), [visibleDocIds])
+  const selectedDocs = useMemo(
+    () => viewDocs.filter((doc) => rawSelectedDocIds.has(String(doc._id ?? ''))),
+    [rawSelectedDocIds, viewDocs]
+  )
+  const selectedDocIds = useMemo(
+    () => new Set(Array.from(rawSelectedDocIds).filter((id) => visibleDocIdSet.has(id))),
+    [rawSelectedDocIds, visibleDocIdSet]
+  )
+  const selectedCount = selectedDocIds.size
+  const allSelected = visibleDocIds.length > 0 && visibleDocIds.every((id) => selectedDocIds.has(id))
+  const someSelected = selectedCount > 0 && !allSelected
+
+  useEffect(() => {
+    if (!selectionResetVersion) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setRawSelectedDocIds(new Set())
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [selectionResetVersion])
+
+  useEffect(() => {
+    if (!selectAllRef.current) {
+      return
+    }
+    selectAllRef.current.indeterminate = someSelected
+  }, [someSelected, allSelected])
+
+  function getDocSelectionKey(doc: QueryDoc) {
+    return String(doc._id ?? '')
+  }
+
+  function toggleDocSelection(doc: QueryDoc) {
+    const key = getDocSelectionKey(doc)
+    if (!key) {
+      return
+    }
+
+    setRawSelectedDocIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      return next
+    })
+  }
+
+  function selectAllVisibleDocs() {
+    setRawSelectedDocIds((prev) => new Set([...prev, ...visibleDocIds]))
+  }
+
+  function clearAllSelectedDocs() {
+    setRawSelectedDocIds(new Set())
+  }
+
+  function clearVisibleSelectedDocs() {
+    setRawSelectedDocIds((prev) => new Set(Array.from(prev).filter((id) => !visibleDocIdSet.has(id))))
+  }
 
   return (
     <div className="rounded-2xl bg-base-200 p-3 shadow md:p-4">
@@ -86,6 +162,34 @@ export function ResultViewSection({
               字段配置
             </button>
           ) : null}
+          {hasBulkActions ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-base-300 bg-base-100 px-3 py-2">
+              <span className="text-xs text-base-content/60">
+                已选 {selectedCount}/{visibleDocIds.length}
+              </span>
+              <button className="btn btn-ghost btn-xs" onClick={clearAllSelectedDocs} disabled={!selectedCount}>
+                清空
+              </button>
+              {onBulkUpdateDocuments ? (
+                <button
+                  className="btn btn-primary btn-xs"
+                  onClick={() => onBulkUpdateDocuments(selectedDocs)}
+                  disabled={!selectedCount}
+                >
+                  批量更新
+                </button>
+              ) : null}
+              {onBulkDeleteDocuments ? (
+                <button
+                  className="btn btn-error btn-outline btn-xs"
+                  onClick={() => onBulkDeleteDocuments(selectedDocs)}
+                  disabled={!selectedCount}
+                >
+                  批量删除
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {queryError ? <div className="alert alert-error py-2 text-sm">{queryError}</div> : null}
         </div>
       </div>
@@ -96,14 +200,26 @@ export function ResultViewSection({
             <div className="space-y-3 md:hidden">
               {viewDocs.map((doc, index) => (
                 <article
-                  key={`mobile-${index}-${String(doc._id || index)}`}
+                  key={`mobile-${index}-${String(doc._id ?? index)}`}
                   className="rounded-xl border border-base-300 bg-base-100 p-3 shadow-sm"
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-xs text-base-content/50">#{index + 1}</div>
-                      <div className="break-all font-mono text-xs text-base-content/70">
-                        {String(doc._id || '-')}
+                    <div className="flex min-w-0 items-start gap-2">
+                      {hasBulkActions ? (
+                        <input
+                          type="checkbox"
+                          className="checkbox checkbox-sm mt-0.5"
+                          checked={selectedDocIds.has(getDocSelectionKey(doc))}
+                          onChange={() => toggleDocSelection(doc)}
+                          disabled={!getDocSelectionKey(doc)}
+                          aria-label={`选择第 ${index + 1} 条记录`}
+                        />
+                      ) : null}
+                      <div className="min-w-0">
+                        <div className="text-xs text-base-content/50">#{index + 1}</div>
+                        <div className="break-all font-mono text-xs text-base-content/70">
+                          {String(doc._id ?? '-')}
+                        </div>
                       </div>
                     </div>
                     {hasRowActions ? (
@@ -147,6 +263,24 @@ export function ResultViewSection({
               <table className="table table-zebra table-pin-rows min-w-max">
                 <thead>
                   <tr>
+                    {hasBulkActions ? (
+                      <th className="w-14 normal-case">
+                        <input
+                          ref={selectAllRef}
+                          type="checkbox"
+                          className="checkbox checkbox-sm"
+                          checked={allSelected}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              selectAllVisibleDocs()
+                            } else {
+                              clearVisibleSelectedDocs()
+                            }
+                          }}
+                          aria-label="全选本页"
+                        />
+                      </th>
+                    ) : null}
                     <th className="w-14 normal-case">#</th>
                     {displayFields.length ? (
                       displayFields.map((field) => (
@@ -181,7 +315,19 @@ export function ResultViewSection({
                 </thead>
                 <tbody>
                   {viewDocs.map((doc, index) => (
-                    <tr key={`${index}-${String(doc._id || index)}`}>
+                    <tr key={`${index}-${String(doc._id ?? index)}`}>
+                      {hasBulkActions ? (
+                        <td className="align-top">
+                          <input
+                            type="checkbox"
+                            className="checkbox checkbox-sm mt-1"
+                            checked={selectedDocIds.has(getDocSelectionKey(doc))}
+                            onChange={() => toggleDocSelection(doc)}
+                            disabled={!getDocSelectionKey(doc)}
+                            aria-label={`选择第 ${index + 1} 条记录`}
+                          />
+                        </td>
+                      ) : null}
                       <td>{index + 1}</td>
                       {displayFields.length ? (
                         displayFields.map((field) => (

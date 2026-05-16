@@ -89,8 +89,9 @@ export type DocumentFieldDraft = {
 
 export type DocumentModalState = {
   open: boolean
-  action: 'create' | 'edit'
+  action: 'create' | 'edit' | 'bulk'
   doc: QueryDoc | null
+  docs: QueryDoc[]
   text: string
   error: string
   mode: DocumentEditMode
@@ -101,6 +102,7 @@ export type DocumentModalState = {
 export type DeleteModalState = {
   open: boolean
   doc: QueryDoc | null
+  docs: QueryDoc[]
   database: string
   collection: string
 }
@@ -175,6 +177,9 @@ export type ResultViewProps = {
   onSortField?: (field: string) => void
   onEditDocument?: (doc: QueryDoc) => void
   onDeleteDocument?: (doc: QueryDoc) => void
+  onBulkUpdateDocuments?: (docs: QueryDoc[]) => void
+  onBulkDeleteDocuments?: (docs: QueryDoc[]) => void
+  selectionResetVersion?: number
   renderField: (doc: QueryDoc, field: string, className?: string) => ReactNode
   footer?: ReactNode
   emptyLabel?: string
