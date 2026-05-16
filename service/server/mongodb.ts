@@ -38,6 +38,7 @@ type DocumentMutationResult = {
   matchedCount: number
   modifiedCount: number
   deletedCount?: number
+  insertedId?: unknown
 }
 
 type DocumentMutationInput = {
@@ -47,9 +48,39 @@ type DocumentMutationInput = {
   document?: unknown
 }
 
+type DocumentInsertInput = {
+  database?: string
+  collection: string
+  document?: unknown
+}
+
 type FieldSetting = {
   key: string
   visible: boolean
+  required?: boolean
+  dataType?: 'string' | 'number' | 'boolean' | 'date' | 'object' | 'array' | 'null' | ''
+  enumOptions?: { value: string; label: string }[]
+  foreignKeys?: ForeignKeySetting[]
+}
+
+type ForeignKeySetting = {
+  targetDatabase?: string
+  targetCollection: string
+  targetField: string
+}
+
+type ForeignKeyEndpoint = {
+  database: string
+  collection: string
+  field: string
+}
+
+type ForeignKeyRelation = {
+  relationKey: string
+  source: ForeignKeyEndpoint
+  target: ForeignKeyEndpoint
+  createdAt?: string
+  updatedAt?: string
 }
 
 type SavedQuery = {
@@ -67,6 +98,7 @@ type CollectionConfig = {
   collection: string
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
+  foreignRelations?: ForeignKeyRelation[]
   createdAt?: string
   updatedAt?: string
 }
@@ -163,14 +195,57 @@ function ensurePlainObject(value: unknown) {
   return value as Record<string, unknown>
 }
 
+function reviveExtendedJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => reviveExtendedJson(item))
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const keys = Object.keys(record)
+
+    if (
+      keys.length === 1 &&
+      Object.prototype.hasOwnProperty.call(record, '$date')
+    ) {
+      const dateValue = record.$date
+      if (typeof dateValue === 'string' || typeof dateValue === 'number') {
+        const date = new Date(dateValue)
+        if (!Number.isNaN(date.getTime())) {
+          return date
+        }
+      }
+    }
+
+    if (
+      keys.length === 1 &&
+      Object.prototype.hasOwnProperty.call(record, '$oid')
+    ) {
+      const oidValue = String(record.$oid || '').trim()
+      if (oidValue && ObjectId.isValid(oidValue)) {
+        return new ObjectId(oidValue)
+      }
+      return oidValue
+    }
+
+    const output: Record<string, unknown> = {}
+    for (const [key, innerValue] of Object.entries(record)) {
+      output[key] = reviveExtendedJson(innerValue)
+    }
+    return output
+  }
+
+  return value
+}
+
 function normalizeInput(value: unknown) {
   if (typeof value === 'string') {
     const trimmed = value.trim()
     if (!trimmed) return {}
-    return JSON.parse(trimmed)
+    return reviveExtendedJson(JSON.parse(trimmed))
   }
 
-  return value ?? {}
+  return reviveExtendedJson(value ?? {})
 }
 
 function serializeValue(value: unknown): unknown {
@@ -291,12 +366,46 @@ function removeIdField(value: unknown): Record<string, unknown> {
   return output
 }
 
+function normalizeInsertDocument(value: unknown) {
+  const doc = serializeValue(value)
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return {}
+  }
+
+  const output = { ...(doc as Record<string, unknown>) }
+  if (output._id === undefined || output._id === null || output._id === '') {
+    output._id = new ObjectId()
+  } else {
+    output._id = parseMongoId(output._id)
+  }
+
+  return output
+}
+
 function extractFieldsFromDocument(doc?: Record<string, unknown> | null) {
   if (!doc || typeof doc !== 'object') {
     return []
   }
 
   return Object.keys(doc).filter((key) => key !== '_id')
+}
+
+function extractFieldsFromDocuments(docs: Record<string, unknown>[]) {
+  const fields: string[] = []
+  const seen = new Set<string>()
+
+  for (const doc of docs) {
+    for (const field of extractFieldsFromDocument(doc)) {
+      if (seen.has(field)) {
+        continue
+      }
+
+      seen.add(field)
+      fields.push(field)
+    }
+  }
+
+  return fields
 }
 
 function normalizeFieldSettings(input: unknown): FieldSetting[] {
@@ -317,14 +426,268 @@ function normalizeFieldSettings(input: unknown): FieldSetting[] {
       continue
     }
 
+    const foreignKeys = normalizeForeignKeys((item as Record<string, unknown>).foreignKeys)
+    const enumOptions = normalizeEnumOptions((item as Record<string, unknown>).enumOptions)
+    const dataType = normalizeFieldDataType((item as Record<string, unknown>).dataType)
+
     seen.add(key)
     output.push({
       key,
       visible: (item as Record<string, unknown>).visible !== false,
+      required: (item as Record<string, unknown>).required === true,
+      dataType,
+      enumOptions,
+      foreignKeys,
     })
   }
 
   return output
+}
+
+function normalizeFieldDataType(input: unknown) {
+  const value = String(input || '').trim()
+  return ['string', 'number', 'boolean', 'date', 'object', 'array', 'null'].includes(value)
+    ? (value as FieldSetting['dataType'])
+    : ''
+}
+
+function normalizeEnumOptions(input: unknown) {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+  const output: { value: string; label: string }[] = []
+
+  for (const item of input) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+
+    const record = item as Record<string, unknown>
+    const value = String(record.value || '').trim()
+    const label = String(record.label || '').trim()
+    if (!value || seen.has(value)) {
+      continue
+    }
+
+    seen.add(value)
+    output.push({
+      value,
+      label: label || value,
+    })
+  }
+
+  return output
+}
+
+function normalizeForeignKeys(input: unknown): ForeignKeySetting[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+  const output: ForeignKeySetting[] = []
+
+  for (const item of input) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+
+    const record = item as Record<string, unknown>
+    const targetCollection = String(record.targetCollection || '').trim()
+    const targetField = String(record.targetField || '').trim() || '_id'
+    const targetDatabase = String(record.targetDatabase || '').trim() || undefined
+    const dedupeKey = `${targetDatabase || ''}::${targetCollection}::${targetField}`
+
+    if (!targetCollection || seen.has(dedupeKey)) {
+      continue
+    }
+
+    seen.add(dedupeKey)
+    output.push({
+      targetDatabase,
+      targetCollection,
+      targetField,
+    })
+  }
+
+  return output
+}
+
+function normalizeEndpoint(input: unknown): ForeignKeyEndpoint | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null
+  }
+
+  const record = input as Record<string, unknown>
+  const database = String(record.database || '').trim()
+  const collection = String(record.collection || '').trim()
+  const field = String(record.field || '').trim()
+
+  if (!database || !collection || !field) {
+    return null
+  }
+
+  return {
+    database,
+    collection,
+    field,
+  }
+}
+
+function buildRelationKey(source: ForeignKeyEndpoint, target: ForeignKeyEndpoint) {
+  const left = `${source.database}.${source.collection}.${source.field}`
+  const right = `${target.database}.${target.collection}.${target.field}`
+  return [left, right].sort().join('::')
+}
+
+function normalizeForeignRelations(input: unknown): ForeignKeyRelation[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+  const output: ForeignKeyRelation[] = []
+
+  for (const item of input) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+
+    const record = item as Record<string, unknown>
+    const relationKey = String(record.relationKey || '').trim()
+    const source = normalizeEndpoint(record.source)
+    const target = normalizeEndpoint(record.target)
+
+    if (!source || !target) {
+      continue
+    }
+
+    const nextKey = relationKey || buildRelationKey(source, target)
+    if (seen.has(nextKey)) {
+      continue
+    }
+
+    seen.add(nextKey)
+    output.push({
+      relationKey: nextKey,
+      source,
+      target,
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
+    })
+  }
+
+  return output
+}
+
+function stripForeignKeysFromSettings(settings: FieldSetting[]) {
+  return settings.map((item) => ({
+    key: item.key,
+    visible: item.visible,
+    required: item.required === true,
+    dataType: item.dataType,
+    enumOptions: normalizeEnumOptions(item.enumOptions),
+    foreignKeys: undefined,
+  }))
+}
+
+function buildForeignRelations(
+  database: string,
+  collection: string,
+  settings: FieldSetting[]
+) {
+  const output: ForeignKeyRelation[] = []
+  const seen = new Set<string>()
+
+  for (const setting of settings) {
+    const relations = normalizeForeignKeys(setting.foreignKeys)
+    for (const relation of relations) {
+      const source: ForeignKeyEndpoint = {
+        database,
+        collection,
+        field: setting.key,
+      }
+      const target: ForeignKeyEndpoint = {
+        database: relation.targetDatabase || database,
+        collection: relation.targetCollection,
+        field: relation.targetField || '_id',
+      }
+      const relationKey = buildRelationKey(source, target)
+      if (seen.has(relationKey)) {
+        continue
+      }
+
+      seen.add(relationKey)
+      output.push({
+        relationKey,
+        source,
+        target,
+      })
+    }
+  }
+
+  return output
+}
+
+function mergeFieldSettingsWithRelations(
+  database: string,
+  collection: string,
+  settings: FieldSetting[],
+  relations: ForeignKeyRelation[]
+) {
+  const output = new Map<string, FieldSetting>()
+
+  for (const setting of settings) {
+    output.set(setting.key, {
+      key: setting.key,
+      visible: setting.visible,
+      required: setting.required === true,
+      dataType: setting.dataType,
+      enumOptions: normalizeEnumOptions(setting.enumOptions),
+      foreignKeys: normalizeForeignKeys(setting.foreignKeys),
+    })
+  }
+
+  for (const relation of relations) {
+    const currentIsSource =
+      relation.source.database === database && relation.source.collection === collection
+    const currentIsTarget =
+      relation.target.database === database && relation.target.collection === collection
+
+    if (!currentIsSource && !currentIsTarget) {
+      continue
+    }
+
+    const currentField = currentIsSource ? relation.source.field : relation.target.field
+    const opposite = currentIsSource ? relation.target : relation.source
+    const existing = output.get(currentField) || {
+      key: currentField,
+      visible: true,
+      foreignKeys: [],
+    }
+
+    const foreignKeys = normalizeForeignKeys(existing.foreignKeys)
+    const dedupeKey = `${opposite.database}::${opposite.collection}::${opposite.field}`
+    if (!foreignKeys.some((item) => `${item.targetDatabase || ''}::${item.targetCollection}::${item.targetField}` === dedupeKey)) {
+      foreignKeys.push({
+        targetDatabase: opposite.database || undefined,
+        targetCollection: opposite.collection,
+        targetField: opposite.field,
+      })
+    }
+
+    output.set(currentField, {
+      key: currentField,
+      visible: existing.visible !== false,
+      dataType: existing.dataType,
+      enumOptions: normalizeEnumOptions(existing.enumOptions),
+      foreignKeys,
+    })
+  }
+
+  return Array.from(output.values())
 }
 
 function normalizeSavedQueries(input: unknown): SavedQuery[] {
@@ -442,8 +805,28 @@ export async function getCollectionConfig(
     database,
     collection,
   })
+  const relationDocs = await configCollection
+    .find({
+      kind: 'relation',
+      $or: [
+        { 'source.database': database, 'source.collection': collection },
+        { 'target.database': database, 'target.collection': collection },
+      ],
+    })
+    .toArray()
+  const relations = normalizeForeignRelations(relationDocs)
+  const normalized = normalizeCollectionConfig(doc) || createEmptyCollectionConfig(database, collection)
 
-  return normalizeCollectionConfig(doc) || createEmptyCollectionConfig(database, collection)
+  return {
+    ...normalized,
+    fieldSettings: mergeFieldSettingsWithRelations(
+      database,
+      collection,
+      normalized.fieldSettings,
+      relations
+    ),
+    foreignRelations: relations,
+  }
 }
 
 export async function saveCollectionConfig(
@@ -469,6 +852,7 @@ export async function saveCollectionConfig(
   const now = new Date().toISOString()
   const fieldSettings = normalizeFieldSettings(input.fieldSettings)
   const savedQueries = normalizeSavedQueries(input.savedQueries)
+  const foreignRelations = buildForeignRelations(database, collection, fieldSettings)
 
   await configCollection.updateOne(
     {
@@ -481,7 +865,7 @@ export async function saveCollectionConfig(
         kind: 'collection',
         database,
         collection,
-        fieldSettings,
+        fieldSettings: stripForeignKeysFromSettings(fieldSettings),
         savedQueries,
         updatedAt: now,
       },
@@ -492,13 +876,61 @@ export async function saveCollectionConfig(
     { upsert: true }
   )
 
+  await Promise.all(
+    foreignRelations.flatMap((relation) =>
+      Array.from(new Set([relation.source.database, relation.target.database]))
+        .filter(Boolean)
+        .map(async (relationDatabase) => {
+          const targetDb = client.db(relationDatabase)
+          const targetConfigCollection = await getConfigCollection(targetDb)
+          await targetConfigCollection.updateOne(
+            {
+              kind: 'relation',
+              relationKey: relation.relationKey,
+            },
+            {
+              $set: {
+                kind: 'relation',
+                relationKey: relation.relationKey,
+                source: relation.source,
+                target: relation.target,
+                updatedAt: now,
+              },
+              $setOnInsert: {
+                createdAt: now,
+              },
+            },
+            { upsert: true }
+          )
+        })
+    )
+  )
+
   const saved = await configCollection.findOne({
     kind: 'collection',
     database,
     collection,
   })
+  const savedRelations = await configCollection
+    .find({
+      kind: 'relation',
+      $or: [
+        { 'source.database': database, 'source.collection': collection },
+        { 'target.database': database, 'target.collection': collection },
+      ],
+    })
+    .toArray()
 
-  return normalizeCollectionConfig(saved) || createEmptyCollectionConfig(database, collection)
+  return {
+    ...(normalizeCollectionConfig(saved) || createEmptyCollectionConfig(database, collection)),
+    fieldSettings: mergeFieldSettingsWithRelations(
+      database,
+      collection,
+      normalizeCollectionConfig(saved)?.fieldSettings || fieldSettings,
+      normalizeForeignRelations(savedRelations)
+    ),
+    foreignRelations: normalizeForeignRelations(savedRelations),
+  }
 }
 
 export async function getMongoMeta(database?: string): Promise<MongoMeta> {
@@ -619,8 +1051,9 @@ export async function queryMongoDocuments(input: QueryInput): Promise<QueryResul
     .limit(pageSize)
     .toArray()
   const fieldsFromSchema = await getFieldsFromSchema(db, input.collection)
-  const fieldsFromDoc =
-    list[0] ? extractFieldsFromDocument(serializeValue(list[0]) as Record<string, unknown>) : []
+  const fieldsFromDoc = extractFieldsFromDocuments(
+    list.map((item) => serializeValue(item) as Record<string, unknown>)
+  )
   const fields = fieldsFromSchema.length ? fieldsFromSchema : fieldsFromDoc
 
   return {
@@ -712,5 +1145,38 @@ export async function deleteMongoDocument(
     matchedCount: result.deletedCount ? 1 : 0,
     modifiedCount: 0,
     deletedCount: result.deletedCount,
+  }
+}
+
+export async function insertMongoDocument(
+  input: DocumentInsertInput
+): Promise<DocumentMutationResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const database = input.database || config.defaultDatabase || getCollectionName(config.uri)
+  if (!database) {
+    throw new Error('database 不能为空，请在请求中指定或配置 MONGODB_DB')
+  }
+
+  if (!input.collection) {
+    throw new Error('collection 不能为空')
+  }
+
+  const rawDocument = normalizeInsertDocument(input.document)
+  const client = await getMongoClient()
+  const db = client.db(database)
+  const collection = db.collection(input.collection)
+  const result = await collection.insertOne(rawDocument as any)
+
+  return {
+    ok: true,
+    database,
+    collection: input.collection,
+    matchedCount: 0,
+    modifiedCount: 0,
+    insertedId: result.insertedId,
   }
 }
