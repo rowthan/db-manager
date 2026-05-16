@@ -1,6 +1,6 @@
-import dynamic from 'next/dynamic'
+'use client'
+
 import { useEffect, useMemo, useState } from 'react'
-import DbLayout from '../../layouts/DbLayout'
 
 type MongoMeta = {
   ok: boolean
@@ -385,7 +385,6 @@ function DatabasePageInner() {
     setDocumentModal((prev) =>
       prev.text ? prev : { ...prev, text: prettyJson(prev.doc), error: '' }
     )
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentModal.open, documentModal.doc])
 
   async function loadMeta(database?: string) {
@@ -724,7 +723,7 @@ function DatabasePageInner() {
   const savedQueries = collectionConfig?.savedQueries || []
 
   return (
-    <DbLayout title="数据库操作" description="独立的 MongoDB 查询页面">
+    <>
       <div className="mx-auto max-w-7xl px-3 py-3 md:px-4 md:py-4">
         <div className="grid gap-3 lg:grid-cols-[360px_minmax(0,1fr)]">
           <div className="space-y-3">
@@ -1379,10 +1378,8 @@ function DatabasePageInner() {
           </div>
         ) : null}
       </div>
-    </DbLayout>
+    </>
   )
 }
 
-export default dynamic(() => Promise.resolve(DatabasePageInner), {
-  ssr: false,
-})
+export default DatabasePageInner

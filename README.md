@@ -1,6 +1,12 @@
 # db-manager
 
-Standalone Next.js app for MongoDB browsing and editing.
+Standalone Next.js 16 app for MongoDB browsing and editing.
+
+## Structure
+
+- App Router at `app/`
+- API route handlers at `app/api/db/*`
+- MongoDB connection code at `service/server/mongodb.ts`
 
 ## Deploy to Vercel
 
@@ -16,7 +22,7 @@ The MongoDB connection string is intentionally not committed to the repository.
 1. Copy `.env.example` to `.env.local`
 2. Set `MONGODB_URI`
 3. Optionally set `MONGODB_DB`
-3. Run `npm run dev`
+4. Run `npm run dev`
 
 ## Features
 

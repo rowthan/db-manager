@@ -2,11 +2,11 @@
 module.exports = {
   darkMode: ['media'],
   content: [
-    './pages/**/*.{ts,tsx}',
-    './components/**/*.{ts,tsx}',
-    './layouts/**/*.{ts,tsx}',
     './app/**/*.{ts,tsx}',
+    './components/**/*.{ts,tsx}',
+    './service/**/*.{ts,tsx}',
     './src/**/*.{ts,tsx}',
+    './utils.ts',
   ],
   theme: {
     // container: {
