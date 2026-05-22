@@ -24,7 +24,7 @@ export function ForeignLookupModal({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-base-300/70 p-4">
-      <div className="w-full max-w-6xl rounded-2xl bg-base-100 p-4 shadow-2xl">
+      <div className="w-full max-w-6xl rounded-xl bg-base-100 p-4 shadow-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
           <div>
             <h3 className="text-lg font-semibold">关联结果</h3>
@@ -53,6 +53,7 @@ export function ForeignLookupModal({
                 renderField={section.renderField}
                 onEditDocument={section.onEditDocument}
                 onDeleteDocument={section.onDeleteDocument}
+                onCopyDocument={section.onCopyDocument}
                 emptyLabel={section.emptyLabel}
                 loadingLabel={section.loadingLabel}
               />

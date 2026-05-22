@@ -1,6 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDownIcon } from '@radix-ui/react-icons'
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover'
 import type { ResultViewProps, QueryDoc } from './types'
 
 function parseSortMap(text?: string) {
@@ -29,6 +31,7 @@ export function ResultViewSection({
   subtitle,
   result: viewResult,
   loading,
+  variant = 'default',
   availableFields: viewAvailableFields,
   visibleFields: viewVisibleFields,
   queryError,
@@ -37,25 +40,28 @@ export function ResultViewSection({
   onSortField,
   onEditDocument,
   onDeleteDocument,
+  onCopyDocument,
   onExportDocuments,
   onBulkUpdateDocuments,
   onBulkDeleteDocuments,
   selectionResetVersion,
   renderField,
+  toolbarAside,
   footer,
   emptyLabel = '没有结果或尚未查询',
   loadingLabel = '正在查询...',
   sortText,
 }: ResultViewProps) {
   const viewDocs = useMemo(() => (viewResult?.list || []) as QueryDoc[], [viewResult?.list])
-  const hasRowActions = Boolean(onEditDocument || onDeleteDocument || onExportDocuments)
+  const hasRowActions = Boolean(onEditDocument || onDeleteDocument || onCopyDocument || onExportDocuments)
   const hasBulkActions = Boolean(onBulkUpdateDocuments || onBulkDeleteDocuments || onExportDocuments)
   const [showAllFields, setShowAllFields] = useState(false)
+  const [fieldPickerOpen, setFieldPickerOpen] = useState(false)
   const [rawSelectedDocIds, setRawSelectedDocIds] = useState<Set<string>>(() => new Set())
   const selectAllRef = useRef<HTMLInputElement | null>(null)
   const displayFields = showAllFields ? viewAvailableFields : viewVisibleFields
-  const fieldToggleLabel = showAllFields ? '收起字段' : '全部字段'
   const sortMap = useMemo(() => parseSortMap(sortText), [sortText])
+  const isCompass = variant === 'compass'
 
   const visibleDocIds = useMemo(
     () =>
@@ -128,90 +134,207 @@ export function ResultViewSection({
   }
 
   return (
-    <div className="rounded-2xl bg-base-200 p-3 shadow md:p-4">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
-          <div className="flex items-center gap-3">
-            <h2 className="text-base font-semibold md:text-lg">{title}</h2>
-            <span className="text-xs text-base-content/50">
-              {displayFields.length}/{viewAvailableFields.length || 0} 字段
-            </span>
-          </div>
-          <p className="text-sm text-base-content/60">{subtitle}</p>
-        </div>
+    <div
+      className={
+        isCompass
+          ? 'overflow-hidden rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] shadow-sm'
+          : 'rounded-xl bg-base-200 p-3 shadow md:p-4'
+      }
+    >
+      <div
+        className={
+          isCompass
+            ? 'flex flex-col gap-4 border-b border-base-300 px-4 py-4'
+            : 'flex flex-col gap-3 md:flex-row md:items-start md:justify-between'
+        }
+      >
+        {isCompass ? (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {onAddDocument ? (
+                  <button className="btn btn-success btn-xs text-white" onClick={onAddDocument}>
+                    添加
+                  </button>
+                ) : null}
+                {onExportDocuments ? (
+                  <button
+                    className="btn btn-outline btn-xs"
+                    onClick={() => onExportDocuments(selectedCount ? selectedDocs : viewDocs)}
+                    disabled={!viewDocs.length}
+                  >
+                    导出
+                  </button>
+                ) : null}
+              </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex cursor-pointer items-center gap-2 rounded-full border border-base-300 bg-base-100 px-3 py-2">
-            <span className="text-xs text-base-content/70">全部字段</span>
-            <input
-              type="checkbox"
-              className="toggle toggle-sm toggle-primary"
-              checked={showAllFields}
-              onChange={(e) => setShowAllFields(e.target.checked)}
-            />
-            <span className="text-xs font-medium text-base-content/70">
-              {fieldToggleLabel}
-            </span>
-          </label>
-          {onAddDocument ? (
-            <button className="btn btn-primary btn-sm" onClick={onAddDocument}>
-              添加数据
-            </button>
-          ) : null}
-          {onOpenFieldConfig ? (
-            <button className="btn btn-outline btn-sm" onClick={onOpenFieldConfig}>
-              字段配置
-            </button>
-          ) : null}
-          {hasBulkActions ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-base-300 bg-base-100 px-3 py-2">
-              <span className="text-xs text-base-content/60">
-                已选 {selectedCount}/{visibleDocIds.length}
-              </span>
-              <button className="btn btn-ghost btn-xs" onClick={clearAllSelectedDocs} disabled={!selectedCount}>
-                清空
-              </button>
-              {onBulkUpdateDocuments ? (
-                <button
-                  className="btn btn-primary btn-xs"
-                  onClick={() => onBulkUpdateDocuments(selectedDocs)}
-                  disabled={!selectedCount}
-                >
-                  批量更新
-                </button>
-              ) : null}
-              {onBulkDeleteDocuments ? (
-                <button
-                  className="btn btn-error btn-outline btn-xs"
-                  onClick={() => onBulkDeleteDocuments(selectedDocs)}
-                  disabled={!selectedCount}
-                >
-                  批量删除
-                </button>
-              ) : null}
-              {onExportDocuments ? (
-                <button
-                  className="btn btn-secondary btn-outline btn-xs"
-                  onClick={() => onExportDocuments(selectedDocs)}
-                  disabled={!selectedCount}
-                >
-                  导出数据
-                </button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Popover open={fieldPickerOpen} onOpenChange={setFieldPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="compass-surface flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-xs text-base-content/70"
+                    >
+                      <span>字段 {displayFields.length}/{viewAvailableFields.length || 0}</span>
+                      <ChevronDownIcon className="h-3.5 w-3.5" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" sideOffset={8} className="w-56 p-0">
+                    <div className="rounded-xl bg-base-100 p-2">
+                      <button
+                        type="button"
+                        className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
+                          !showAllFields ? 'bg-base-200 text-base-content' : 'hover:bg-base-200/70'
+                        }`}
+                        onClick={() => {
+                          setShowAllFields(false)
+                          setFieldPickerOpen(false)
+                        }}
+                      >
+                        <span>显示精简字段</span>
+                        {!showAllFields ? <span className="text-xs text-base-content/45">当前</span> : null}
+                      </button>
+                      <button
+                        type="button"
+                        className={`mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
+                          showAllFields ? 'bg-base-200 text-base-content' : 'hover:bg-base-200/70'
+                        }`}
+                        onClick={() => {
+                          setShowAllFields(true)
+                          setFieldPickerOpen(false)
+                        }}
+                      >
+                        <span>显示全部字段</span>
+                        {showAllFields ? <span className="text-xs text-base-content/45">当前</span> : null}
+                      </button>
+                      {onOpenFieldConfig ? (
+                        <button
+                          type="button"
+                          className="mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-base-200/70"
+                          onClick={() => {
+                            setFieldPickerOpen(false)
+                            onOpenFieldConfig()
+                          }}
+                        >
+                          <span>管理字段显示</span>
+                        </button>
+                      ) : null}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+                <div className="compass-surface rounded-xl border px-2.5 py-1.5 text-xs text-base-content/60">
+                  已选 {selectedCount}/{visibleDocIds.length || 0}
+                </div>
+                {toolbarAside ? <div className="flex flex-wrap items-center gap-2">{toolbarAside}</div> : null}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-base-content/80">{title}</div>
+                <div className="mt-1 text-sm text-base-content/55">{subtitle}</div>
+              </div>
+              {selectedCount ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button className="btn btn-ghost btn-xs" onClick={clearAllSelectedDocs}>
+                    清空选择
+                  </button>
+                  {onExportDocuments ? (
+                    <button className="btn btn-outline btn-xs" onClick={() => onExportDocuments(selectedDocs)}>
+                      导出选中
+                    </button>
+                  ) : null}
+                </div>
               ) : null}
             </div>
-          ) : null}
-          {queryError ? <div className="alert alert-error py-2 text-sm">{queryError}</div> : null}
-        </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-base font-semibold md:text-lg">{title}</h2>
+                <span className="text-xs text-base-content/50">
+                  {displayFields.length}/{viewAvailableFields.length || 0} 字段
+                </span>
+              </div>
+              <p className="text-sm text-base-content/60">{subtitle}</p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex cursor-pointer items-center gap-2 rounded-full border border-base-300 bg-base-100 px-3 py-2">
+                <span className="text-xs text-base-content/70">全部字段</span>
+                <input
+                  type="checkbox"
+                  className="toggle toggle-sm toggle-primary"
+                  checked={showAllFields}
+                  onChange={(e) => setShowAllFields(e.target.checked)}
+                />
+                <span className="text-xs font-medium text-base-content/70">
+                  {showAllFields ? '收起字段' : '显示全部'}
+                </span>
+              </label>
+              {onAddDocument ? (
+                <button className="btn btn-primary btn-sm" onClick={onAddDocument}>
+                  添加数据
+                </button>
+              ) : null}
+              {onOpenFieldConfig ? (
+                <button className="btn btn-outline btn-sm" onClick={onOpenFieldConfig}>
+                  字段配置
+                </button>
+              ) : null}
+              {hasBulkActions ? (
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-base-300 bg-base-100 px-3 py-2">
+                  <span className="text-xs text-base-content/60">
+                    已选 {selectedCount}/{visibleDocIds.length}
+                  </span>
+                  <button className="btn btn-ghost btn-xs" onClick={clearAllSelectedDocs} disabled={!selectedCount}>
+                    清空
+                  </button>
+                  {onBulkUpdateDocuments ? (
+                    <button
+                      className="btn btn-primary btn-xs"
+                      onClick={() => onBulkUpdateDocuments(selectedDocs)}
+                      disabled={!selectedCount}
+                    >
+                      批量更新
+                    </button>
+                  ) : null}
+                  {onBulkDeleteDocuments ? (
+                    <button
+                      className="btn btn-error btn-outline btn-xs"
+                      onClick={() => onBulkDeleteDocuments(selectedDocs)}
+                      disabled={!selectedCount}
+                    >
+                      批量删除
+                    </button>
+                  ) : null}
+                  {onExportDocuments ? (
+                    <button
+                      className="btn btn-secondary btn-outline btn-xs"
+                      onClick={() => onExportDocuments(selectedDocs)}
+                      disabled={!selectedCount}
+                    >
+                      导出数据
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </>
+        )}
+
+        {queryError ? <div className="alert alert-error py-2 text-sm">{queryError}</div> : null}
       </div>
 
-      <div className="mt-3">
+      <div className={isCompass ? 'px-4 py-4' : 'mt-3'}>
         {viewDocs.length ? (
           <>
             <div className="space-y-3 md:hidden">
               {viewDocs.map((doc, index) => (
                 <article
                   key={`mobile-${index}-${String(doc._id ?? index)}`}
-                  className="rounded-xl border border-base-300 bg-base-100 p-3 shadow-sm"
+                  className="rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-3 shadow-sm"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex min-w-0 items-start gap-2">
@@ -244,6 +367,11 @@ export function ResultViewSection({
                             删除
                           </button>
                         ) : null}
+                        {onCopyDocument ? (
+                          <button className="btn btn-outline btn-xs" onClick={() => onCopyDocument(doc)}>
+                            复制
+                          </button>
+                        ) : null}
                         {onExportDocuments ? (
                           <button className="btn btn-secondary btn-outline btn-xs" onClick={() => onExportDocuments([doc])}>
                             导出
@@ -274,7 +402,7 @@ export function ResultViewSection({
               ))}
             </div>
 
-            <div className="hidden overflow-auto rounded-xl border border-base-300 bg-base-100 md:block">
+            <div className="hidden overflow-auto rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] md:block">
               <table className="table table-zebra table-pin-rows min-w-max">
                 <thead>
                   <tr>
@@ -324,7 +452,7 @@ export function ResultViewSection({
                       <th className="normal-case">字段</th>
                     )}
                       {hasRowActions ? (
-                        <th className="sticky right-0 z-20 w-60 bg-base-200 text-center normal-case">操作</th>
+                        <th className={`sticky right-0 z-20 w-60 text-center normal-case ${isCompass ? 'bg-[hsl(var(--app-panel-bg))]' : 'bg-base-200'}`}>操作</th>
                       ) : null}
                   </tr>
                 </thead>
@@ -354,7 +482,7 @@ export function ResultViewSection({
                         <td className="text-sm text-base-content/50">没有可展示的字段，查看原始 JSON。</td>
                       )}
                       {hasRowActions ? (
-                        <td className="sticky right-0 z-10 w-60 bg-base-100 align-top">
+                        <td className="sticky right-0 z-10 w-60 bg-[hsl(var(--app-panel-bg))] align-top">
                           <div className="flex flex-wrap items-center justify-center gap-2 whitespace-nowrap px-1">
                             {onEditDocument ? (
                               <button className="btn btn-outline btn-xs" onClick={() => onEditDocument(doc)}>
@@ -364,6 +492,11 @@ export function ResultViewSection({
                             {onDeleteDocument ? (
                               <button className="btn btn-error btn-outline btn-xs" onClick={() => onDeleteDocument(doc)}>
                                 删除
+                              </button>
+                            ) : null}
+                            {onCopyDocument ? (
+                              <button className="btn btn-outline btn-xs" onClick={() => onCopyDocument(doc)}>
+                                复制
                               </button>
                             ) : null}
                             {onExportDocuments ? (
@@ -387,7 +520,7 @@ export function ResultViewSection({
         )}
       </div>
 
-      {footer ? <div className="mt-3">{footer}</div> : null}
+      {footer ? <div className={isCompass ? 'border-t border-base-300 px-4 py-4' : 'mt-3'}>{footer}</div> : null}
     </div>
   )
 }

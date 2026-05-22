@@ -23,10 +23,88 @@
   --input: 214.3 31.8% 91.4%;
   --ring: 262 83% 58%;
   --radius: 0.75rem;
+
+  --app-shell-bg: 210 20% 97%;
+  --app-sidebar-bg: 0 0% 99%;
+  --app-panel-bg: 0 0% 100%;
+  --app-panel-muted: 210 20% 98%;
+  --app-panel-border: 214 20% 88%;
+  --app-panel-text: 210 30% 16%;
+  --app-panel-text-muted: 215 14% 47%;
+  --app-accent: 152 72% 33%;
+  --app-accent-soft: 152 60% 94%;
+
+  --p: 152 72% 33%;
+  --pc: 0 0% 100%;
+  --s: 214 32% 91%;
+  --sc: 210 30% 18%;
+  --a: 210 40% 96%;
+  --ac: 210 30% 18%;
+  --n: 214 20% 18%;
+  --nc: 210 40% 98%;
+  --b1: 0 0% 100%;
+  --b2: 210 20% 98%;
+  --b3: 214 18% 92%;
+  --bc: 210 30% 16%;
+  --in: 198 93% 60%;
+  --su: 152 72% 33%;
+  --wa: 35 92% 54%;
+  --er: 0 73% 58%;
 }
 
 html {
-  color-scheme: light;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 222 35% 10%;
+    --foreground: 210 20% 92%;
+    --card: 222 30% 12%;
+    --card-foreground: 210 20% 92%;
+    --popover: 222 30% 12%;
+    --popover-foreground: 210 20% 92%;
+    --primary: 152 68% 45%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 219 24% 18%;
+    --secondary-foreground: 210 20% 92%;
+    --muted: 220 22% 15%;
+    --muted-foreground: 215 16% 68%;
+    --accent: 220 20% 17%;
+    --accent-foreground: 210 20% 92%;
+    --destructive: 0 70% 58%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 219 18% 24%;
+    --input: 219 18% 24%;
+    --ring: 152 68% 45%;
+
+    --app-shell-bg: 222 30% 8%;
+    --app-sidebar-bg: 222 26% 10%;
+    --app-panel-bg: 222 24% 12%;
+    --app-panel-muted: 223 22% 15%;
+    --app-panel-border: 219 18% 22%;
+    --app-panel-text: 210 20% 92%;
+    --app-panel-text-muted: 215 15% 68%;
+    --app-accent: 152 68% 45%;
+    --app-accent-soft: 152 36% 16%;
+
+    --p: 152 68% 45%;
+    --pc: 210 40% 98%;
+    --s: 222 18% 18%;
+    --sc: 210 20% 92%;
+    --a: 222 18% 18%;
+    --ac: 210 20% 92%;
+    --n: 222 22% 14%;
+    --nc: 210 20% 92%;
+    --b1: 222 24% 12%;
+    --b2: 223 22% 15%;
+    --b3: 219 18% 20%;
+    --bc: 210 20% 92%;
+    --in: 198 86% 64%;
+    --su: 152 68% 45%;
+    --wa: 35 92% 62%;
+    --er: 0 70% 58%;
+  }
 }
 
 body {
@@ -34,6 +112,8 @@ body {
   margin: 0;
   min-height: 100vh;
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: hsl(var(--app-shell-bg));
+  color: hsl(var(--app-panel-text));
 }
 
 code,
@@ -49,4 +129,26 @@ samp {
 
 ::selection {
   background: hsl(var(--primary) / 0.15);
+}
+
+.compass-surface {
+  background-color: hsl(var(--app-panel-bg));
+  color: hsl(var(--app-panel-text));
+  border-color: hsl(var(--app-panel-border));
+}
+
+.compass-surface-muted {
+  background-color: hsl(var(--app-panel-muted));
+  color: hsl(var(--app-panel-text));
+  border-color: hsl(var(--app-panel-border));
+}
+
+.compass-input {
+  background-color: hsl(var(--app-panel-bg));
+  color: hsl(var(--app-panel-text));
+  border-color: hsl(var(--app-panel-border));
+}
+
+.compass-input::placeholder {
+  color: hsl(var(--app-panel-text-muted));
 }

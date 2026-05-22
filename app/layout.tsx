@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
-import type { ReactNode } from 'react'
+import { Suspense, type ReactNode } from 'react'
 import './globals.css'
+import { RootAppFrame } from '@/components/root-app-frame'
 
 export const metadata: Metadata = {
   title: {
@@ -17,7 +18,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>
-      <body>{children}</body>
+      <body>
+        <Suspense fallback={children}>
+          <RootAppFrame>{children}</RootAppFrame>
+        </Suspense>
+      </body>
     </html>
   )
 }

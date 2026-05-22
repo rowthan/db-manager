@@ -44,8 +44,13 @@ export type FieldSetting = {
   visible: boolean
   required?: boolean
   dataType?: DocumentFieldDraft['type'] | ''
+  dataTypes?: DocumentFieldDraft['type'][]
   enumOptions?: FieldEnumOption[]
   foreignKeys?: ForeignKeySetting[]
+  indexed?: boolean
+  unique?: boolean
+  sparse?: boolean
+  children?: FieldSetting[]
 }
 
 export type FieldEnumOption = {
@@ -66,6 +71,27 @@ export type SavedQuery = {
   sortText: string
   pageSize: number
   findOne: boolean
+  favorite?: boolean
+}
+
+export type IndexSyncConflict = {
+  field: string
+  kind: 'conflict' | 'create_failed' | 'drop_failed'
+  message: string
+}
+
+export type IndexSyncSummary = {
+  applied: string[]
+  removed: string[]
+  conflicts: IndexSyncConflict[]
+}
+
+export type CollectionIndexInfo = {
+  name: string
+  key: string
+  unique: boolean
+  sparse: boolean
+  managed: boolean
 }
 
 export type CollectionConfig = {
@@ -74,6 +100,8 @@ export type CollectionConfig = {
   collection: string
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
+  indexSync?: IndexSyncSummary
+  liveIndexes?: CollectionIndexInfo[]
   createdAt?: string
   updatedAt?: string
 }
@@ -114,6 +142,9 @@ export type ExportModalState = {
   collection: string
   fieldRules: ExportFieldRule[]
   fileNameBase: string
+  resultFormat: ExportResultFormat
+  objectKeySource: ExportObjectKeySource
+  objectKeyField: string
 }
 
 export type ExportFieldRule = {
@@ -121,6 +152,9 @@ export type ExportFieldRule = {
   include: boolean
   alias: string
 }
+
+export type ExportResultFormat = 'array' | 'object'
+export type ExportObjectKeySource = 'unique' | 'custom'
 
 export type CloudflarePublishResult = {
   ok: boolean
@@ -130,6 +164,66 @@ export type CloudflarePublishResult = {
   domain: string
   enabled: boolean
   sizeBytes: number
+}
+
+export type PublishRecordQuerySnapshot = {
+  database: string
+  collection: string
+  filterText: string
+  projectionText: string
+  sortText: string
+  page: number
+  pageSize: number
+  findOne: boolean
+  sourceDocumentIds: string[]
+}
+
+export type PublishRecordExportSnapshot = {
+  fileNameBase: string
+  resultFormat: ExportResultFormat
+  objectKeySource: ExportObjectKeySource
+  objectKeyField: string
+  fieldRules: ExportFieldRule[]
+}
+
+export type PublishRecordPublishSnapshot = {
+  provider: 'cloudflare-r2'
+  bucketName: string
+  publicBaseUrl?: string
+  enablePublicAccess: boolean
+  objectKey: string
+  url: string
+  domain: string
+  enabled: boolean
+  sizeBytes: number
+}
+
+export type PublishRecord = {
+  id: string
+  createdAt?: string
+  updatedAt?: string
+  source: PublishRecordQuerySnapshot
+  export: PublishRecordExportSnapshot
+  publish: PublishRecordPublishSnapshot
+  previewText: string
+  previewCount: number
+}
+
+export type PublishRecordInput = {
+  source: PublishRecordQuerySnapshot
+  export: PublishRecordExportSnapshot
+  publish: PublishRecordPublishSnapshot
+  previewText: string
+  previewCount: number
+}
+
+export type PublishRecordListResponse = {
+  ok: boolean
+  items: PublishRecord[]
+  total: number
+  page: number
+  pageSize: number
+  error?: string
 }
 
 export type CommonQueryPreset = {
@@ -162,7 +256,12 @@ export type FieldTemplateEditorState = {
   fieldLabel: string
   required: boolean
   dataType: DocumentFieldDraft['type'] | ''
+  dataTypes: DocumentFieldDraft['type'][]
   enumOptions: FieldEnumOption[]
+  indexed: boolean
+  unique: boolean
+  sparse: boolean
+  children: FieldSetting[]
 }
 
 export type ForeignLookupModalState = {
@@ -172,6 +271,13 @@ export type ForeignLookupModalState = {
   value: unknown
   relations: ForeignLookupRelation[]
   items: ForeignLookupResultItem[]
+}
+
+export type FieldValuePreviewModalState = {
+  open: boolean
+  fieldPath: string
+  fieldLabel: string
+  value: unknown
 }
 
 export type CollectionConfigCacheEntry = {
@@ -193,6 +299,7 @@ export type ResultViewProps = {
   subtitle: string
   result: MongoQueryResult | null
   loading: boolean
+  variant?: 'default' | 'compass'
   availableFields: string[]
   visibleFields: string[]
   sortText?: string
@@ -202,11 +309,13 @@ export type ResultViewProps = {
   onSortField?: (field: string) => void
   onEditDocument?: (doc: QueryDoc) => void
   onDeleteDocument?: (doc: QueryDoc) => void
+  onCopyDocument?: (doc: QueryDoc) => void
   onExportDocuments?: (docs: QueryDoc[]) => void
   onBulkUpdateDocuments?: (docs: QueryDoc[]) => void
   onBulkDeleteDocuments?: (docs: QueryDoc[]) => void
   selectionResetVersion?: number
   renderField: (doc: QueryDoc, field: string, className?: string) => ReactNode
+  toolbarAside?: ReactNode
   footer?: ReactNode
   emptyLabel?: string
   loadingLabel?: string
@@ -224,6 +333,7 @@ export type ForeignLookupModalSection = {
   renderField: (doc: QueryDoc, field: string, className?: string) => ReactNode
   onEditDocument?: (doc: QueryDoc) => void
   onDeleteDocument?: (doc: QueryDoc) => void
+  onCopyDocument?: (doc: QueryDoc) => void
   emptyLabel?: string
   loadingLabel?: string
 }

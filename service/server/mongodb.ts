@@ -54,13 +54,29 @@ type DocumentInsertInput = {
   document?: unknown
 }
 
+type CollectionCreateInput = {
+  database?: string
+  collection: string
+}
+
+type CollectionCreateResult = {
+  ok: true
+  database: string
+  collection: string
+}
+
 type FieldSetting = {
   key: string
   visible: boolean
   required?: boolean
   dataType?: 'string' | 'number' | 'boolean' | 'date' | 'object' | 'array' | 'null' | ''
+  dataTypes?: ('string' | 'number' | 'boolean' | 'date' | 'object' | 'array' | 'null')[]
   enumOptions?: { value: string; label: string }[]
   foreignKeys?: ForeignKeySetting[]
+  indexed?: boolean
+  unique?: boolean
+  sparse?: boolean
+  children?: FieldSetting[]
 }
 
 type ForeignKeySetting = {
@@ -90,6 +106,27 @@ type SavedQuery = {
   sortText: string
   pageSize: number
   findOne: boolean
+  favorite?: boolean
+}
+
+type IndexSyncConflict = {
+  field: string
+  kind: 'conflict' | 'create_failed' | 'drop_failed'
+  message: string
+}
+
+type IndexSyncSummary = {
+  applied: string[]
+  removed: string[]
+  conflicts: IndexSyncConflict[]
+}
+
+type CollectionIndexInfo = {
+  name: string
+  key: string
+  unique: boolean
+  sparse: boolean
+  managed: boolean
 }
 
 type CollectionConfig = {
@@ -99,6 +136,8 @@ type CollectionConfig = {
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
   foreignRelations?: ForeignKeyRelation[]
+  indexSync?: IndexSyncSummary
+  liveIndexes?: CollectionIndexInfo[]
   createdAt?: string
   updatedAt?: string
 }
@@ -108,6 +147,60 @@ type CollectionConfigInput = {
   collection: string
   fieldSettings?: FieldSetting[]
   savedQueries?: SavedQuery[]
+}
+
+type PublishRecordQuerySnapshot = {
+  database: string
+  collection: string
+  filterText: string
+  projectionText: string
+  sortText: string
+  page: number
+  pageSize: number
+  findOne: boolean
+  sourceDocumentIds: string[]
+}
+
+type PublishRecordExportSnapshot = {
+  fileNameBase: string
+  resultFormat: 'array' | 'object'
+  objectKeySource: 'unique' | 'custom'
+  objectKeyField: string
+  fieldRules: { key: string; include: boolean; alias: string }[]
+}
+
+type PublishRecordPublishSnapshot = {
+  provider: 'cloudflare-r2'
+  bucketName: string
+  publicBaseUrl?: string
+  enablePublicAccess: boolean
+  objectKey: string
+  url: string
+  domain: string
+  enabled: boolean
+  sizeBytes: number
+}
+
+type PublishRecordInput = {
+  source: PublishRecordQuerySnapshot
+  export: PublishRecordExportSnapshot
+  publish: PublishRecordPublishSnapshot
+  previewText: string
+  previewCount: number
+}
+
+type PublishRecord = PublishRecordInput & {
+  kind: 'publish'
+  createdAt?: string
+  updatedAt?: string
+}
+
+type PublishRecordListResult = {
+  ok: true
+  items: PublishRecord[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 type MongoMeta = {
@@ -122,6 +215,7 @@ type MongoMeta = {
 
 let cachedClient: Promise<MongoClient> | null = null
 const CONFIG_COLLECTION = '_collection_config'
+const PUBLISH_RECORDS_COLLECTION = '_publish_records'
 
 function readConfig(): MongoConfig {
   const uri = process.env.MONGODB_URI || process.env.MONGO_URL || ''
@@ -135,6 +229,11 @@ function readConfig(): MongoConfig {
     uri,
     defaultDatabase,
   }
+}
+
+function getSystemDatabaseName() {
+  const config = readConfig()
+  return config.defaultDatabase || getCollectionName(config.uri) || ''
 }
 
 function inferDatabaseFromUri(uri: string) {
@@ -428,16 +527,26 @@ function normalizeFieldSettings(input: unknown): FieldSetting[] {
 
     const foreignKeys = normalizeForeignKeys((item as Record<string, unknown>).foreignKeys)
     const enumOptions = normalizeEnumOptions((item as Record<string, unknown>).enumOptions)
-    const dataType = normalizeFieldDataType((item as Record<string, unknown>).dataType)
+    const dataTypes = normalizeFieldDataTypes(
+      (item as Record<string, unknown>).dataTypes ?? (item as Record<string, unknown>).dataType
+    )
+    const children = normalizeFieldSettings(
+      (item as Record<string, unknown>).children ?? (item as Record<string, unknown>).fields
+    )
 
     seen.add(key)
     output.push({
       key,
       visible: (item as Record<string, unknown>).visible !== false,
       required: (item as Record<string, unknown>).required === true,
-      dataType,
+      dataType: dataTypes[0] || '',
+      dataTypes,
       enumOptions,
       foreignKeys,
+      indexed: (item as Record<string, unknown>).indexed === true,
+      unique: (item as Record<string, unknown>).unique === true,
+      sparse: (item as Record<string, unknown>).sparse === true,
+      children,
     })
   }
 
@@ -449,6 +558,24 @@ function normalizeFieldDataType(input: unknown) {
   return ['string', 'number', 'boolean', 'date', 'object', 'array', 'null'].includes(value)
     ? (value as FieldSetting['dataType'])
     : ''
+}
+
+function normalizeFieldDataTypes(input: unknown) {
+  const values = Array.isArray(input) ? input : [input]
+  const seen = new Set<string>()
+  const output: NonNullable<FieldSetting['dataTypes']> = []
+
+  for (const item of values) {
+    const value = normalizeFieldDataType(item)
+    if (!value || seen.has(value)) {
+      continue
+    }
+
+    seen.add(value)
+    output.push(value)
+  }
+
+  return output
 }
 
 function normalizeEnumOptions(input: unknown) {
@@ -582,14 +709,19 @@ function normalizeForeignRelations(input: unknown): ForeignKeyRelation[] {
   return output
 }
 
-function stripForeignKeysFromSettings(settings: FieldSetting[]) {
+function stripForeignKeysFromSettings(settings: FieldSetting[]): FieldSetting[] {
   return settings.map((item) => ({
     key: item.key,
     visible: item.visible,
     required: item.required === true,
     dataType: item.dataType,
+    dataTypes: normalizeFieldDataTypes(item.dataTypes || item.dataType),
     enumOptions: normalizeEnumOptions(item.enumOptions),
     foreignKeys: undefined,
+    indexed: item.indexed === true,
+    unique: item.unique === true,
+    sparse: item.sparse === true,
+    children: item.children ? stripForeignKeysFromSettings(item.children) : [],
   }))
 }
 
@@ -645,8 +777,12 @@ function mergeFieldSettingsWithRelations(
       visible: setting.visible,
       required: setting.required === true,
       dataType: setting.dataType,
+      dataTypes: normalizeFieldDataTypes(setting.dataTypes || setting.dataType),
       enumOptions: normalizeEnumOptions(setting.enumOptions),
       foreignKeys: normalizeForeignKeys(setting.foreignKeys),
+      indexed: setting.indexed === true,
+      unique: setting.unique === true,
+      sparse: setting.sparse === true,
     })
   }
 
@@ -682,8 +818,13 @@ function mergeFieldSettingsWithRelations(
       key: currentField,
       visible: existing.visible !== false,
       dataType: existing.dataType,
+      dataTypes: normalizeFieldDataTypes(existing.dataTypes || existing.dataType),
       enumOptions: normalizeEnumOptions(existing.enumOptions),
       foreignKeys,
+      indexed: existing.indexed === true,
+      unique: existing.unique === true,
+      sparse: existing.sparse === true,
+      children: existing.children ? normalizeFieldSettings(existing.children) : [],
     })
   }
 
@@ -716,10 +857,194 @@ function normalizeSavedQueries(input: unknown): SavedQuery[] {
       sortText: String((item as Record<string, unknown>).sortText || '{"createAt":-1}'),
       pageSize: Math.max(1, Number((item as Record<string, unknown>).pageSize || 20)),
       findOne: Boolean((item as Record<string, unknown>).findOne),
+      favorite: (item as Record<string, unknown>).favorite === true,
     })
   }
 
   return output
+}
+
+function buildManagedIndexName(field: string) {
+  return `cfg__${field}`
+}
+
+function isManagedIndexName(name: unknown) {
+  return typeof name === 'string' && name.startsWith('cfg__')
+}
+
+function normalizeIndexKey(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return []
+  }
+
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([, direction]) => direction === 1 || direction === -1 || direction === '1' || direction === '-1')
+    .map(([field, direction]) => [field, Number(direction)] as const)
+}
+
+function normalizeIndexOptionFlag(value: unknown) {
+  return value === true
+}
+
+function formatIndexKey(value: unknown) {
+  const entries = normalizeIndexKey(value)
+  if (!entries.length) {
+    return '-'
+  }
+
+  return entries.map(([field, direction]) => `${field}:${direction}`).join(', ')
+}
+
+async function getCollectionLiveIndexes(db: Db, collection: string): Promise<CollectionIndexInfo[]> {
+  const indexes = await db.collection(collection).indexes()
+  return indexes.map((index) => ({
+    name: String(index.name || ''),
+    key: formatIndexKey(index.key),
+    unique: normalizeIndexOptionFlag(index.unique),
+    sparse: normalizeIndexOptionFlag(index.sparse),
+    managed: isManagedIndexName(index.name),
+  }))
+}
+
+async function syncCollectionIndexes(
+  db: Db,
+  collection: string,
+  fieldSettings: FieldSetting[]
+): Promise<IndexSyncSummary> {
+  const targetCollection = db.collection(collection)
+  const summary: IndexSyncSummary = {
+    applied: [],
+    removed: [],
+    conflicts: [],
+  }
+
+  const desiredIndexMap = new Map<
+    string,
+    {
+      name: string
+      key: Record<string, 1>
+      unique: boolean
+      sparse: boolean
+    }
+  >()
+
+  for (const setting of fieldSettings) {
+    const field = String(setting.key || '').trim()
+    if (!field) {
+      continue
+    }
+
+    if (!setting.indexed && !setting.unique && !setting.sparse) {
+      continue
+    }
+
+    desiredIndexMap.set(field, {
+      name: buildManagedIndexName(field),
+      key: { [field]: 1 },
+      unique: setting.unique === true,
+      sparse: setting.sparse === true,
+    })
+  }
+
+  const existingIndexes = await targetCollection.indexes()
+  const managedIndexes = existingIndexes.filter((index) => isManagedIndexName(index.name))
+
+  for (const index of managedIndexes) {
+    const keyEntries = normalizeIndexKey(index.key)
+    if (keyEntries.length !== 1) {
+      continue
+    }
+
+    const [field] = keyEntries[0]
+    if (desiredIndexMap.has(field)) {
+      continue
+    }
+
+    try {
+      await targetCollection.dropIndex(String(index.name))
+      summary.removed.push(field)
+    } catch (error) {
+      summary.conflicts.push({
+        field,
+        kind: 'drop_failed',
+        message: error instanceof Error ? error.message : `删除索引 ${String(index.name)} 失败`,
+      })
+    }
+  }
+
+  for (const [field, desired] of desiredIndexMap) {
+    const matchingIndexes = existingIndexes.filter((index) => {
+      const keyEntries = normalizeIndexKey(index.key)
+      return keyEntries.length === 1 && keyEntries[0][0] === field && keyEntries[0][1] === 1
+    })
+
+    const exactMatch = matchingIndexes.find(
+      (index) =>
+        normalizeIndexOptionFlag(index.unique) === desired.unique &&
+        normalizeIndexOptionFlag(index.sparse) === desired.sparse
+    )
+
+    if (exactMatch) {
+      continue
+    }
+
+    if (!desired.unique && !desired.sparse && matchingIndexes.length) {
+      continue
+    }
+
+    const conflictingUnmanaged = matchingIndexes.find((index) => !isManagedIndexName(index.name))
+    if (conflictingUnmanaged) {
+      summary.conflicts.push({
+        field,
+        kind: 'conflict',
+        message: `字段 ${field} 已存在索引 ${conflictingUnmanaged.name}，与配置的 unique=${desired.unique} / sparse=${desired.sparse} 不一致`,
+      })
+      continue
+    }
+
+    const conflictingManaged = matchingIndexes.find((index) => isManagedIndexName(index.name))
+    if (conflictingManaged) {
+      try {
+        await targetCollection.dropIndex(String(conflictingManaged.name))
+      } catch (error) {
+        summary.conflicts.push({
+          field,
+          kind: 'drop_failed',
+          message: error instanceof Error ? error.message : `删除索引 ${String(conflictingManaged.name)} 失败`,
+        })
+        continue
+      }
+    }
+
+    try {
+      const options: {
+        name: desired.name,
+        unique?: true,
+        sparse?: true,
+      } = {
+        name: desired.name,
+      }
+
+      if (desired.unique) {
+        options.unique = true
+      }
+
+      if (desired.sparse) {
+        options.sparse = true
+      }
+
+      await targetCollection.createIndex(desired.key, options)
+      summary.applied.push(field)
+    } catch (error) {
+      summary.conflicts.push({
+        field,
+        kind: 'create_failed',
+        message: error instanceof Error ? error.message : `创建字段 ${field} 的索引失败`,
+      })
+    }
+  }
+
+  return summary
 }
 
 function normalizeCollectionConfig(doc: unknown): CollectionConfig | null {
@@ -741,6 +1066,122 @@ function normalizeCollectionConfig(doc: unknown): CollectionConfig | null {
     collection,
     fieldSettings: normalizeFieldSettings(record.fieldSettings),
     savedQueries: normalizeSavedQueries(record.savedQueries),
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
+  }
+}
+
+function normalizePublishRecordInput(input: unknown): PublishRecordInput | null {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const record = input as Record<string, unknown>
+  const source = record.source as Record<string, unknown> | undefined
+  const exportRecord = record.export as Record<string, unknown> | undefined
+  const publish = record.publish as Record<string, unknown> | undefined
+  const previewText = String(record.previewText || '').trim()
+
+  if (!source || !exportRecord || !publish || !previewText) {
+    return null
+  }
+
+  const sourceDatabase = String(source.database || '').trim()
+  const sourceCollection = String(source.collection || '').trim()
+  if (!sourceDatabase || !sourceCollection) {
+    return null
+  }
+
+  const sourceDocumentIds = Array.isArray(source.sourceDocumentIds)
+    ? source.sourceDocumentIds.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+
+  const fieldRules = Array.isArray(exportRecord.fieldRules)
+    ? exportRecord.fieldRules
+        .map((item) => {
+          if (!item || typeof item !== 'object') {
+            return null
+          }
+          const rule = item as Record<string, unknown>
+          const key = String(rule.key || '').trim()
+          if (!key) {
+            return null
+          }
+          return {
+            key,
+            include: rule.include !== false,
+            alias: String(rule.alias || key).trim() || key,
+          }
+        })
+        .filter((item): item is { key: string; include: boolean; alias: string } => Boolean(item))
+    : []
+
+  const fileNameBase = String(exportRecord.fileNameBase || '').trim()
+  const resultFormat = exportRecord.resultFormat === 'object' ? 'object' : 'array'
+  const objectKeySource = exportRecord.objectKeySource === 'unique' ? 'unique' : 'custom'
+  const objectKeyField = String(exportRecord.objectKeyField || '').trim()
+  const provider = publish.provider === 'cloudflare-r2' ? 'cloudflare-r2' : null
+  const bucketName = String(publish.bucketName || '').trim()
+  const objectKey = String(publish.objectKey || '').trim()
+  const url = String(publish.url || '').trim()
+  const domain = String(publish.domain || '').trim()
+  const enabled = publish.enabled !== false
+  const sizeBytes = Math.max(0, Number(publish.sizeBytes || 0))
+
+  if (!provider || !bucketName || !objectKey || !url) {
+    return null
+  }
+
+  return {
+    source: {
+      database: sourceDatabase,
+      collection: sourceCollection,
+      filterText: String(source.filterText || '{}'),
+      projectionText: String(source.projectionText || '{}'),
+      sortText: String(source.sortText || '{"createAt":-1}'),
+      page: Math.max(0, Number(source.page || 0)),
+      pageSize: Math.max(1, Number(source.pageSize || 10)),
+      findOne: Boolean(source.findOne),
+      sourceDocumentIds,
+    },
+    export: {
+      fileNameBase,
+      resultFormat,
+      objectKeySource,
+      objectKeyField,
+      fieldRules,
+    },
+    publish: {
+      provider,
+      bucketName,
+      publicBaseUrl: typeof publish.publicBaseUrl === 'string' ? publish.publicBaseUrl.trim() || undefined : undefined,
+      enablePublicAccess: publish.enablePublicAccess !== false,
+      objectKey,
+      url,
+      domain,
+      enabled,
+      sizeBytes,
+    },
+    previewText,
+    previewCount: Math.max(0, Number(record.previewCount || 0)),
+  }
+}
+
+function normalizePublishRecord(doc: unknown): (PublishRecord & { id: string }) | null {
+  if (!doc || typeof doc !== 'object') {
+    return null
+  }
+
+  const record = doc as Record<string, unknown>
+  const normalized = normalizePublishRecordInput(record)
+  if (!normalized) {
+    return null
+  }
+
+  return {
+    id: String(record._id || '').trim(),
+    kind: 'publish',
+    ...normalized,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
   }
@@ -778,6 +1219,10 @@ async function getFieldsFromSchema(
 
 async function getConfigCollection(db: Db) {
   return db.collection(CONFIG_COLLECTION)
+}
+
+async function getPublishRecordCollection(db: Db) {
+  return db.collection(PUBLISH_RECORDS_COLLECTION)
 }
 
 export async function getCollectionConfig(
@@ -826,6 +1271,12 @@ export async function getCollectionConfig(
       relations
     ),
     foreignRelations: relations,
+    indexSync: {
+      applied: [],
+      removed: [],
+      conflicts: [],
+    },
+    liveIndexes: await getCollectionLiveIndexes(db, collection),
   }
 }
 
@@ -853,6 +1304,7 @@ export async function saveCollectionConfig(
   const fieldSettings = normalizeFieldSettings(input.fieldSettings)
   const savedQueries = normalizeSavedQueries(input.savedQueries)
   const foreignRelations = buildForeignRelations(database, collection, fieldSettings)
+  const indexSync = await syncCollectionIndexes(db, collection, fieldSettings)
 
   await configCollection.updateOne(
     {
@@ -930,7 +1382,120 @@ export async function saveCollectionConfig(
       normalizeForeignRelations(savedRelations)
     ),
     foreignRelations: normalizeForeignRelations(savedRelations),
+    indexSync,
+    liveIndexes: await getCollectionLiveIndexes(db, collection),
   }
+}
+
+export async function createPublishRecord(
+  input: PublishRecordInput
+): Promise<PublishRecord & { id: string }> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const normalized = normalizePublishRecordInput(input)
+  if (!normalized) {
+    throw new Error('发布记录数据不完整')
+  }
+
+  const client = await getMongoClient()
+  const systemDatabase = getSystemDatabaseName()
+  if (!systemDatabase) {
+    throw new Error('无法确定发布记录存储库')
+  }
+
+  const db = client.db(systemDatabase)
+  const collection = await getPublishRecordCollection(db)
+  const now = new Date().toISOString()
+  const insertDoc = {
+    kind: 'publish' as const,
+    ...normalized,
+    createdAt: now,
+    updatedAt: now,
+  }
+
+  const result = await collection.insertOne(insertDoc as any)
+  const saved = await collection.findOne({ _id: result.insertedId })
+  const normalizedSaved = normalizePublishRecord(saved)
+  if (!normalizedSaved) {
+    throw new Error('保存发布记录失败')
+  }
+
+  return normalizedSaved
+}
+
+export async function listPublishRecords(input: {
+  page?: number
+  pageSize?: number
+  database?: string
+  collection?: string
+} = {}): Promise<PublishRecordListResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const client = await getMongoClient()
+  const systemDatabase = getSystemDatabaseName()
+  if (!systemDatabase) {
+    throw new Error('无法确定发布记录存储库')
+  }
+
+  const db = client.db(systemDatabase)
+  const collection = await getPublishRecordCollection(db)
+  const page = Math.max(0, Number(input.page || 0))
+  const pageSize = Math.max(1, Math.min(Number(input.pageSize || 20), 100))
+  const filter: Record<string, unknown> = { kind: 'publish' }
+
+  if (input.database?.trim()) {
+    filter['source.database'] = input.database.trim()
+  }
+
+  if (input.collection?.trim()) {
+    filter['source.collection'] = input.collection.trim()
+  }
+
+  const total = await collection.countDocuments(filter)
+  const items = await collection
+    .find(filter)
+    .sort({ createdAt: -1, _id: -1 })
+    .skip(page * pageSize)
+    .limit(pageSize)
+    .toArray()
+
+  return {
+    ok: true,
+    items: items.map((item) => normalizePublishRecord(serializeValue(item)) as PublishRecord & { id: string }),
+    total,
+    page,
+    pageSize,
+  }
+}
+
+export async function getPublishRecordById(id: string) {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const client = await getMongoClient()
+  const systemDatabase = getSystemDatabaseName()
+  if (!systemDatabase) {
+    throw new Error('无法确定发布记录存储库')
+  }
+
+  const db = client.db(systemDatabase)
+  const collection = await getPublishRecordCollection(db)
+  const targetId = parseMongoId(id)
+  const doc = await collection.findOne({ _id: targetId as any })
+  const normalized = normalizePublishRecord(serializeValue(doc))
+  if (!normalized) {
+    return null
+  }
+
+  return normalized
 }
 
 export async function getMongoMeta(database?: string): Promise<MongoMeta> {
@@ -1071,6 +1636,39 @@ export async function queryMongoDocuments(input: QueryInput): Promise<QueryResul
       : fields.length
         ? 'document'
         : 'empty',
+  }
+}
+
+export async function createMongoCollection(input: CollectionCreateInput): Promise<CollectionCreateResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const collectionName = input.collection?.trim()
+  if (!collectionName) {
+    throw new Error('collection 不能为空')
+  }
+
+  const database = input.database || config.defaultDatabase || getCollectionName(config.uri)
+  if (!database) {
+    throw new Error('database 不能为空，请在请求中指定或配置 MONGODB_DB')
+  }
+
+  const client = await getMongoClient()
+  const db = client.db(database)
+  const existing = await db.listCollections({ name: collectionName }, { nameOnly: true }).toArray()
+
+  if (existing.length) {
+    throw new Error(`集合 ${collectionName} 已存在`)
+  }
+
+  await db.createCollection(collectionName)
+
+  return {
+    ok: true,
+    database,
+    collection: collectionName,
   }
 }
 
