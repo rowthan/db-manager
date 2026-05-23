@@ -403,7 +403,7 @@ export function ResultViewSection({
             </div>
 
             <div className="hidden overflow-auto rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] md:block">
-              <table className="table table-zebra table-pin-rows min-w-max">
+              <table className="table table-zebra table-pin-rows min-w-max text-sm [&_td]:px-3 [&_td]:py-2 [&_th]:px-3 [&_th]:py-2.5">
                 <thead>
                   <tr>
                     {hasBulkActions ? (
@@ -458,12 +458,12 @@ export function ResultViewSection({
                 </thead>
                 <tbody>
                   {viewDocs.map((doc, index) => (
-                    <tr key={`${index}-${String(doc._id ?? index)}`}>
+                    <tr key={`${index}-${String(doc._id ?? index)}`} className="[&>td]:leading-5">
                       {hasBulkActions ? (
                         <td className="align-top">
                           <input
                             type="checkbox"
-                            className="checkbox checkbox-sm mt-1"
+                            className="checkbox checkbox-sm mt-0.5"
                             checked={selectedDocIds.has(getDocSelectionKey(doc))}
                             onChange={() => toggleDocSelection(doc)}
                             disabled={!getDocSelectionKey(doc)}
@@ -482,8 +482,8 @@ export function ResultViewSection({
                         <td className="text-sm text-base-content/50">没有可展示的字段，查看原始 JSON。</td>
                       )}
                       {hasRowActions ? (
-                        <td className="sticky right-0 z-10 w-60 bg-[hsl(var(--app-panel-bg))] align-top">
-                          <div className="flex flex-wrap items-center justify-center gap-2 whitespace-nowrap px-1">
+                        <td className="sticky right-0 z-10 w-56 bg-[hsl(var(--app-panel-bg))] align-top">
+                          <div className="flex flex-wrap items-center justify-center gap-1.5 whitespace-nowrap">
                             {onEditDocument ? (
                               <button className="btn btn-outline btn-xs" onClick={() => onEditDocument(doc)}>
                                 编辑

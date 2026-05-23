@@ -54,7 +54,6 @@ const STORAGE_COLLECTION_KEY = 'db-page:selected-collection'
 const STORAGE_WORKSPACE_TABS_KEY = 'db-page:workspace-tabs'
 const STORAGE_ACTIVE_WORKSPACE_TAB_ID_KEY = 'db-page:active-workspace-tab-id'
 const WORKSPACE_TAB_PREFIX = 'workspace-tab'
-const COMPASS_CONNECTION_LABEL = 'localhost:27017'
 
 type DatabasePageClientProps = {
   cloudflarePublishConfigured?: boolean
@@ -2923,6 +2922,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     fieldLabel: '',
     value: null,
   })
+  const connectionLabel = meta?.connectionLabel || 'MongoDB'
   const [saveQueryPopoverOpen, setSaveQueryPopoverOpen] = useState(false)
   const [saveQueryAsFavorite, setSaveQueryAsFavorite] = useState(false)
   const [collectionFilter, _setCollectionFilter] = useState('')
@@ -6147,20 +6147,20 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
               </div>
             </div>
 
-            <div className="flex-1 min-h-0 px-4 py-4 lg:px-6">
+            <div className="flex-1 min-h-0 px-2 py-2 lg:px-4 lg:py-3">
               <div className="flex h-full min-h-0 flex-col rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] shadow-sm">
-                <div className="border-b border-base-300 px-6 py-4 pb-0">
-                  <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
+                <div className="border-b border-base-300 px-6 py-3 pb-0">
+                  <div className="flex flex-col gap-1.5 xl:flex-row xl:items-start xl:justify-between">
                     <div>
-                      <div className="flex flex-wrap items-center gap-3 text-sm font-medium">
-                        <span className="text-success">{COMPASS_CONNECTION_LABEL}</span>
+                      <div className="flex flex-wrap items-center gap-2.5 text-sm font-medium leading-5">
+                        <span className="text-success">{connectionLabel}</span>
                         <span className="text-base-content/35">›</span>
                         <span className="text-success">{workspaceDatabase || '-'}</span>
                         <span className="text-base-content/35">›</span>
                         <span>{workspaceCollection || '未选集合'}</span>
                         <button
                           type="button"
-                          className="btn btn-ghost btn-xs h-8 w-8 p-0 text-base-content/65"
+                          className="btn btn-ghost btn-xs h-7 w-7 p-0 text-base-content/65"
                           onClick={() => void loadMeta(form.database)}
                           title={loadingMeta ? '刷新中...' : '刷新状态'}
                           aria-label={loadingMeta ? '刷新中...' : '刷新状态'}
@@ -6171,14 +6171,14 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                     </div>
                   </div>
 
-                  <div className="mt-3 flex flex-wrap items-center gap-6 border-b border-base-300">
+                  <div className="mt-2 flex flex-wrap items-center gap-5 border-b border-base-300">
                     {WORKSPACE_CONTENT_TAB_ITEMS.map((item) => {
                       const active = activeWorkspaceView === item.key
                       return (
                         <button
                           key={item.key}
                           type="button"
-                          className={`relative pb-4 text-lg font-medium transition ${
+                          className={`relative pb-3 text-[1.05rem] font-medium leading-5 transition ${
                             active ? 'text-success' : 'text-base-content/65 hover:text-base-content'
                           }`}
                           onClick={() => updateWorkspaceContentTab(item.key)}

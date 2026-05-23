@@ -5,6 +5,7 @@ export type MongoMeta = {
   connected: boolean
   database?: string
   defaultDatabase?: string
+  connectionLabel?: string
   databases: { name: string; sizeOnDisk?: number }[]
   collections: { name: string }[]
   error?: string

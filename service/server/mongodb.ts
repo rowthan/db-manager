@@ -208,6 +208,7 @@ type MongoMeta = {
   connected: boolean
   database?: string
   defaultDatabase?: string
+  connectionLabel?: string
   databases: { name: string; sizeOnDisk?: number }[]
   collections: { name: string }[]
   error?: string
@@ -253,6 +254,18 @@ function inferDatabaseFromUri(uri: string) {
 
 function getCollectionName(uri: string) {
   return inferDatabaseFromUri(uri)
+}
+
+function inferConnectionLabel(uri: string) {
+  if (!uri) {
+    return ''
+  }
+
+  const withoutProtocol = uri.replace(/^[a-z0-9+.-]+:\/\//i, '')
+  const withoutAuth = withoutProtocol.replace(/^[^@/]+@/, '')
+  const hostSection = withoutAuth.split('/')[0]?.split('?')[0]?.trim() || ''
+
+  return hostSection || ''
 }
 
 export function getMongoConnectionInfo() {
@@ -1500,11 +1513,13 @@ export async function getPublishRecordById(id: string) {
 
 export async function getMongoMeta(database?: string): Promise<MongoMeta> {
   const config = readConfig()
+  const connectionLabel = inferConnectionLabel(config.uri) || undefined
   if (!config.uri) {
     return {
       ok: false,
       connected: false,
       defaultDatabase: config.defaultDatabase || undefined,
+      connectionLabel,
       databases: [],
       collections: [],
       error: 'MONGODB_URI 未配置',
@@ -1536,6 +1551,7 @@ export async function getMongoMeta(database?: string): Promise<MongoMeta> {
       connected: true,
       database: activeDatabase || undefined,
       defaultDatabase: config.defaultDatabase || undefined,
+      connectionLabel,
       databases: databaseList,
       collections: collections.map((item) => ({ name: item.name })),
     }
@@ -1545,6 +1561,7 @@ export async function getMongoMeta(database?: string): Promise<MongoMeta> {
       ok: false,
       connected: false,
       defaultDatabase: config.defaultDatabase || undefined,
+      connectionLabel,
       databases: [],
       collections: [],
       error: message,

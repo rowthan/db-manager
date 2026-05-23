@@ -5,11 +5,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import type { ReactNode } from 'react'
 import type { MongoMeta } from './db-page/types'
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from './ui/sheet'
 
 const STORAGE_DATABASE_KEY = 'db-page:selected-database'
 const STORAGE_COLLECTION_KEY = 'db-page:selected-collection'
-const STORAGE_SIDEBAR_COLLAPSED_KEY = 'db-page:sidebar-collapsed'
-const COMPASS_CONNECTION_LABEL = 'localhost:27017'
 
 type ManagerShellProps = {
   children: ReactNode
@@ -30,6 +29,7 @@ export function ManagerShell({ children }: ManagerShellProps) {
   const [selectedCollection, setSelectedCollection] = useState('')
   const [expandedDatabases, setExpandedDatabases] = useState<string[]>([])
   const [collectionFilter, setCollectionFilter] = useState('')
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [createCollectionModal, setCreateCollectionModal] = useState<{
     open: boolean
     database: string
@@ -42,12 +42,6 @@ export function ManagerShell({ children }: ManagerShellProps) {
     collectionName: '',
     error: '',
     submitting: false,
-  })
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === 'undefined') {
-      return false
-    }
-    return window.localStorage.getItem(STORAGE_SIDEBAR_COLLAPSED_KEY) === 'true'
   })
 
   const routeDatabase = searchParams?.get('database')?.trim() || ''
@@ -68,14 +62,6 @@ export function ManagerShell({ children }: ManagerShellProps) {
     }
     void loadMeta(database || undefined)
   }, [routeCollection, routeDatabase])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    window.localStorage.setItem(STORAGE_SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed))
-  }, [sidebarCollapsed])
 
   async function loadMeta(database?: string) {
     setLoadingMeta(true)
@@ -139,6 +125,7 @@ export function ManagerShell({ children }: ManagerShellProps) {
       }
       void loadMeta(database)
     }
+    setMobileMenuOpen(false)
   }
 
   function openCollection(database: string, collection: string) {
@@ -149,6 +136,7 @@ export function ManagerShell({ children }: ManagerShellProps) {
       window.localStorage.setItem(STORAGE_COLLECTION_KEY, collection)
     }
     router.push(`/db?database=${encodeURIComponent(database)}&collection=${encodeURIComponent(collection)}`)
+    setMobileMenuOpen(false)
   }
 
   function openCreateCollectionModal(database: string) {
@@ -235,173 +223,209 @@ export function ManagerShell({ children }: ManagerShellProps) {
     [collectionFilter, meta?.collections]
   )
 
-  return (
-    <div className="h-screen overflow-hidden bg-[hsl(var(--app-shell-bg))] text-[hsl(var(--app-panel-text))]">
-      <div className={`grid h-full min-h-0 ${sidebarCollapsed ? 'lg:grid-cols-[88px_minmax(0,1fr)]' : 'lg:grid-cols-[320px_minmax(0,1fr)]'}`}>
-        <aside className="flex h-full min-h-0 flex-col overflow-hidden border-r border-[hsl(var(--app-panel-border))] bg-[hsl(var(--app-sidebar-bg))]">
-          <div className="shrink-0 border-b border-base-300 px-4 py-5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="h-5 w-5 rounded-full bg-success shadow-[0_0_0_4px_rgba(22,163,74,0.12)]" />
-                {!sidebarCollapsed ? <h1 className="text-[1.65rem] font-bold leading-none tracking-tight">MongoDB 管理器</h1> : null}
-              </div>
-              <button
-                className="btn btn-ghost btn-sm text-xl"
-                onClick={() => setSidebarCollapsed((prev) => !prev)}
-                title={sidebarCollapsed ? '展开侧栏' : '收起侧栏'}
-                type="button"
-              >
-                {sidebarCollapsed ? '»' : '«'}
-              </button>
-            </div>
+  const connectionLabel = meta?.connectionLabel || 'MongoDB'
+  const currentLocationLabel = selectedCollection || selectedDatabase || '未选数据库'
 
-            <div className={`mt-4 grid gap-2 ${sidebarCollapsed ? 'grid-cols-1' : 'grid-cols-2'}`}>
-              {NAV_ITEMS.map((item) => {
-                const active = pathname === item.href
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={`btn btn-sm justify-start ${active ? 'btn-primary text-white' : 'btn-outline'}`}
-                  >
-                    {sidebarCollapsed ? item.label.slice(0, 1) : `${item.icon} ${item.label}`}
-                  </Link>
-                )
-              })}
-            </div>
-
-            {!sidebarCollapsed ? (
-              <div className="mt-4 flex items-center gap-2">
-                <input
-                  className="input input-bordered input-sm compass-input w-full"
-                  value={collectionFilter}
-                  onChange={(e) => setCollectionFilter(e.target.value)}
-                  placeholder="搜索数据库 / 集合"
-                />
-                <button
-                  className="btn btn-outline btn-sm"
-                  onClick={() => void loadMeta(selectedDatabase || undefined)}
-                  title="刷新连接状态"
-                  type="button"
-                >
-                  {loadingMeta ? '…' : '↻'}
-                </button>
-              </div>
-            ) : null}
+  function renderSidebarContent(isMobile = false) {
+    return (
+      <>
+        <div className={`shrink-0 border-b border-base-300 ${isMobile ? 'px-4 py-4' : 'px-4 py-5'}`}>
+          <div className="flex items-center gap-3">
+            <div className="h-5 w-5 rounded-full bg-success shadow-[0_0_0_4px_rgba(22,163,74,0.12)]" />
+            <h1 className={`${isMobile ? 'text-xl' : 'text-[1.65rem]'} font-bold leading-none tracking-tight`}>
+              MongoDB 管理器
+            </h1>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-            <div className={`flex items-center justify-between px-2 pb-2 text-sm font-semibold text-base-content/75 ${sidebarCollapsed ? 'justify-center' : ''}`}>
-              <span>{sidebarCollapsed ? '连' : `连接 (${meta?.connected ? 1 : 0})`}</span>
-              {!sidebarCollapsed ? <span className="text-base-content/45">＋</span> : null}
+          <div className="mt-4 flex flex-col gap-2">
+            {NAV_ITEMS.map((item) => {
+              const active = pathname === item.href
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onClick={() => setMobileMenuOpen(false)}
+                  className={`btn btn-sm w-full justify-start ${active ? 'btn-primary text-white' : 'btn-outline'}`}
+                >
+                  {item.icon} {item.label}
+                </Link>
+              )
+            })}
+          </div>
+
+          <div className="mt-4 flex items-center gap-2">
+            <input
+              className="input input-bordered input-sm compass-input w-full"
+              value={collectionFilter}
+              onChange={(e) => setCollectionFilter(e.target.value)}
+              placeholder="搜索数据库 / 集合"
+            />
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={() => void loadMeta(selectedDatabase || undefined)}
+              title="刷新连接状态"
+              type="button"
+            >
+              {loadingMeta ? '…' : '↻'}
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+          <div className="flex items-center justify-between px-2 pb-2 text-sm font-semibold text-base-content/75">
+            <span>{`连接 (${meta?.connected ? 1 : 0})`}</span>
+            <span className="text-base-content/45">＋</span>
+          </div>
+
+          <div className="space-y-1">
+            <div className="rounded-xl border border-base-300 bg-base-50 px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-base-content/50">▼</span>
+                <span className="h-2.5 w-2.5 rounded-full bg-success" />
+                <span className="font-medium">{connectionLabel}</span>
+                {meta?.connected ? (
+                  <span className="rounded-full bg-success/10 px-2 py-0.5 text-[11px] text-success">
+                    已连接
+                  </span>
+                ) : null}
+              </div>
             </div>
 
-            <div className="space-y-1">
-              <div className={`rounded-xl border border-base-300 bg-base-50 px-3 py-2 ${sidebarCollapsed ? 'px-2' : ''}`}>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-base-content/50">▼</span>
-                  <span className="h-2.5 w-2.5 rounded-full bg-success" />
-                  {!sidebarCollapsed ? <span className="font-medium">{COMPASS_CONNECTION_LABEL}</span> : null}
-                  {meta?.connected ? (
-                    <span className={`rounded-full bg-success/10 px-2 py-0.5 text-[11px] text-success ${sidebarCollapsed ? 'hidden' : ''}`}>
-                      已连接
-                    </span>
+            {(meta?.databases || []).map((database) => {
+              const expanded = expandedDatabases.includes(database.name)
+              const active = database.name === selectedDatabase
+              return (
+                <div key={database.name} className="group rounded-xl">
+                  <div
+                    className={`flex items-center gap-2 rounded-xl px-3 py-2 hover:bg-base-200 ${active ? 'bg-success/10 text-success' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      onClick={() => activateDatabase(database.name)}
+                    >
+                      <span className="text-xs text-base-content/50">{expanded ? '▼' : '▶'}</span>
+                      <span className="text-sm text-base-content/55">🛢</span>
+                      <span className="font-medium">{database.name}</span>
+                      {database.name === meta?.defaultDatabase ? (
+                        <span className="rounded-full bg-base-200 px-2 py-0.5 text-[11px] text-base-content/60">
+                          默认库
+                        </span>
+                      ) : null}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-xs opacity-100 transition lg:opacity-0 lg:group-hover:opacity-100"
+                      title={`在 ${database.name} 中添加 collection`}
+                      onClick={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        openCreateCollectionModal(database.name)
+                      }}
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  {expanded ? (
+                    <div className="ml-5 mt-1 space-y-0.5 border-l border-base-300 pl-3">
+                      {active && activeCollections.length ? (
+                        activeCollections.map((collection) => (
+                          <button
+                            key={collection.name}
+                            type="button"
+                            className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left hover:bg-base-200 ${selectedCollection === collection.name ? 'bg-success/10 text-success' : ''}`}
+                            onClick={() => openCollection(database.name, collection.name)}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className="text-sm text-base-content/45">▦</span>
+                              <span className="truncate font-medium">{collection.name}</span>
+                            </div>
+                            <span className="text-xs text-base-content/35">打开</span>
+                          </button>
+                        ))
+                      ) : active ? (
+                        <div className="px-3 py-2 text-sm text-base-content/45">暂无集合</div>
+                      ) : (
+                        <div className="px-3 py-2 text-sm text-base-content/45">切换到该数据库后加载集合</div>
+                      )}
+                    </div>
                   ) : null}
                 </div>
-              </div>
-
-              {(meta?.databases || []).map((database) => {
-                const expanded = expandedDatabases.includes(database.name)
-                const active = database.name === selectedDatabase
-                return (
-                  <div key={database.name} className="group rounded-xl">
-                    <div
-                      className={`flex items-center gap-2 rounded-xl px-3 py-2 hover:bg-base-200 ${active ? 'bg-success/10 text-success' : ''}`}
-                    >
-                      <button
-                        type="button"
-                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        onClick={() => activateDatabase(database.name)}
-                      >
-                        <span className="text-xs text-base-content/50">{expanded ? '▼' : '▶'}</span>
-                        <span className="text-sm text-base-content/55">🛢</span>
-                        {!sidebarCollapsed ? <span className="font-medium">{database.name}</span> : null}
-                        {database.name === meta?.defaultDatabase ? (
-                          <span className={`rounded-full bg-base-200 px-2 py-0.5 text-[11px] text-base-content/60 ${sidebarCollapsed ? 'hidden' : ''}`}>
-                            默认库
-                          </span>
-                        ) : null}
-                      </button>
-
-                      {!sidebarCollapsed ? (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-xs opacity-0 transition group-hover:opacity-100"
-                          title={`在 ${database.name} 中添加 collection`}
-                          onClick={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            openCreateCollectionModal(database.name)
-                          }}
-                        >
-                          +
-                        </button>
-                      ) : null}
-                    </div>
-
-                    {expanded && !sidebarCollapsed ? (
-                      <div className="ml-5 mt-1 space-y-0.5 border-l border-base-300 pl-3">
-                        {active && activeCollections.length ? (
-                          activeCollections.map((collection) => (
-                            <button
-                              key={collection.name}
-                              type="button"
-                              className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left hover:bg-base-200 ${selectedCollection === collection.name ? 'bg-success/10 text-success' : ''}`}
-                              onClick={() => openCollection(database.name, collection.name)}
-                            >
-                              <div className="flex min-w-0 items-center gap-2">
-                                <span className="text-sm text-base-content/45">▦</span>
-                                <span className="truncate font-medium">{collection.name}</span>
-                              </div>
-                              <span className="text-xs text-base-content/35">打开</span>
-                            </button>
-                          ))
-                        ) : active ? (
-                          <div className="px-3 py-2 text-sm text-base-content/45">暂无集合</div>
-                        ) : (
-                          <div className="px-3 py-2 text-sm text-base-content/45">切换到该数据库后加载集合</div>
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
+              )
+            })}
           </div>
+        </div>
 
-          <div className="shrink-0 border-t border-base-300 px-4 py-3">
-            <div className="flex items-center justify-between text-sm text-base-content/60">
-              <div className="flex items-center gap-2">
-                <span className={`h-3 w-3 rounded-full ${meta?.connected ? 'bg-success' : 'bg-error'}`} />
-                {!sidebarCollapsed ? <span>{meta?.connected ? '已连接' : '未连接'}</span> : null}
-              </div>
-              {!sidebarCollapsed ? <span>MongoDB 6.0.8</span> : null}
+        <div className={`shrink-0 border-t border-base-300 px-4 ${isMobile ? 'py-4' : 'py-3'}`}>
+          <div className="flex items-center justify-between text-sm text-base-content/60">
+            <div className="flex items-center gap-2">
+              <span className={`h-3 w-3 rounded-full ${meta?.connected ? 'bg-success' : 'bg-error'}`} />
+              <span>{meta?.connected ? '已连接' : '未连接'}</span>
             </div>
-            {!sidebarCollapsed ? (
-              <div className="mt-2 flex items-center justify-between gap-3 text-xs text-base-content/45">
-                <div className="min-w-0">
-                  <div className="truncate">当前用户：Mongo 管理员</div>
-                  <div className="truncate">{selectedDatabase || '未选数据库'}</div>
-                </div>
-                <button className="btn btn-ghost btn-xs text-error" onClick={() => void handleLogout()} type="button">
-                  退出登录
-                </button>
-              </div>
-            ) : null}
+            <span>MongoDB 6.0.8</span>
           </div>
+          <div className="mt-2 flex items-center justify-between gap-3 text-xs text-base-content/45">
+            <div className="min-w-0">
+              <div className="truncate">当前用户：Mongo 管理员</div>
+              <div className="truncate">{selectedDatabase || '未选数据库'}</div>
+            </div>
+            <button
+              className="btn btn-ghost btn-xs text-error"
+              onClick={() => {
+                setMobileMenuOpen(false)
+                void handleLogout()
+              }}
+              type="button"
+            >
+              退出登录
+            </button>
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  return (
+    <div className="h-screen overflow-hidden bg-[hsl(var(--app-shell-bg))] text-[hsl(var(--app-panel-text))]">
+      <div className="hidden h-full min-h-0 lg:grid lg:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="flex h-full min-h-0 flex-col overflow-hidden border-r border-[hsl(var(--app-panel-border))] bg-[hsl(var(--app-sidebar-bg))]">
+          {renderSidebarContent()}
         </aside>
 
         <main className="min-h-0 overflow-hidden">{children}</main>
+      </div>
+
+      <div className="flex h-full min-h-0 flex-col lg:hidden">
+        <header className="flex shrink-0 items-center gap-3 border-b border-[hsl(var(--app-panel-border))] bg-[hsl(var(--app-panel-bg))] px-3 py-2">
+          <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+            <SheetTrigger asChild>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm h-10 min-h-0 px-3 text-base font-medium"
+                aria-label="打开菜单"
+              >
+                <span className="text-lg leading-none">☰</span>
+                <span>菜单</span>
+              </button>
+            </SheetTrigger>
+            <SheetContent
+              side="left"
+              className="flex h-full w-[88vw] max-w-none flex-col overflow-hidden border-[hsl(var(--app-panel-border))] bg-[hsl(var(--app-sidebar-bg))] p-0 sm:max-w-md"
+            >
+              <SheetTitle className="sr-only">导航菜单</SheetTitle>
+              {renderSidebarContent(true)}
+            </SheetContent>
+          </Sheet>
+
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium text-base-content">{currentLocationLabel}</div>
+            <div className="truncate text-xs text-base-content/55">{meta?.connected ? '连接正常' : '未连接 MongoDB'}</div>
+          </div>
+        </header>
+
+        <main className="min-h-0 flex-1 overflow-hidden">{children}</main>
       </div>
 
       {createCollectionModal.open ? (
