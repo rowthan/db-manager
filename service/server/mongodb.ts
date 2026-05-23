@@ -1018,7 +1018,7 @@ async function syncCollectionIndexes(
 
     try {
       const options: {
-        name: desired.name,
+        name: string
         unique?: true,
         sparse?: true,
       } = {

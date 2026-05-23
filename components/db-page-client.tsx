@@ -73,7 +73,7 @@ type WorkspaceTab = {
   collectionConfig: CollectionConfig | null
 }
 
-type StoredWorkspaceTab = Omit<WorkspaceTab, 'result' | 'queryError'>
+type StoredWorkspaceTab = Pick<WorkspaceTab, 'id' | 'database' | 'collection' | 'form' | 'view'>
 
 const WORKSPACE_CONTENT_TAB_ITEMS: {
   key: WorkspaceContentTab
@@ -90,7 +90,7 @@ function isWorkspaceContentTab(value: unknown): value is WorkspaceContentTab {
   return value === 'documents' || value === 'aggregations' || value === 'schema' || value === 'indexes' || value === 'validation'
 }
 
-function parseStoredWorkspaceTabs(raw: string | null): StoredWorkspaceTab[] {
+function parseStoredWorkspaceTabs(raw: string | null): WorkspaceTab[] {
   if (!raw) {
     return []
   }
