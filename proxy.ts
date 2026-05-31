@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { AUTH_COOKIE_NAME, getAuthConfig, sanitizeNextPath, verifySessionToken } from '@/lib/auth'
 
-const protectedApiPrefix = '/api/db'
-const protectedPagePrefix = '/db'
+const protectedApiPrefixes = ['/api/db', '/api/mail']
+const protectedPagePrefixes = ['/db', '/mail']
 
 export async function proxy(request: NextRequest) {
   const authConfig = getAuthConfig()
@@ -14,7 +14,7 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
-  if (path.startsWith(protectedApiPrefix)) {
+  if (protectedApiPrefixes.some((prefix) => path.startsWith(prefix))) {
     return NextResponse.json(
       {
         ok: false,
@@ -24,7 +24,7 @@ export async function proxy(request: NextRequest) {
     )
   }
 
-  if (path.startsWith(protectedPagePrefix)) {
+  if (protectedPagePrefixes.some((prefix) => path.startsWith(prefix))) {
     const redirectUrl = new URL('/signin', request.url)
     redirectUrl.searchParams.set('next', sanitizeNextPath(request.nextUrl.pathname + request.nextUrl.search))
     if (!authConfig) {
@@ -37,5 +37,5 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/db/:path*', '/api/db/:path*'],
+  matcher: ['/db/:path*', '/mail/:path*', '/api/db/:path*', '/api/mail/:path*'],
 }

@@ -25,6 +25,22 @@ export type MongoQueryResult = {
   error?: string
 }
 
+export type MongoAggregationResult = {
+  ok: boolean
+  database?: string
+  collection?: string
+  total?: number
+  page?: number
+  pageSize?: number
+  skip?: number
+  list?: Record<string, unknown>[]
+  fields?: string[]
+  fieldSource?: 'schema' | 'document' | 'empty'
+  limitApplied?: number
+  stageCount?: number
+  error?: string
+}
+
 export type QueryForm = {
   database: string
   collection: string
@@ -75,6 +91,12 @@ export type SavedQuery = {
   favorite?: boolean
 }
 
+export type SavedAggregation = {
+  name: string
+  pipelineText: string
+  favorite?: boolean
+}
+
 export type IndexSyncConflict = {
   field: string
   kind: 'conflict' | 'create_failed' | 'drop_failed'
@@ -101,6 +123,7 @@ export type CollectionConfig = {
   collection: string
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
+  savedAggregations?: SavedAggregation[]
   indexSync?: IndexSyncSummary
   liveIndexes?: CollectionIndexInfo[]
   createdAt?: string

@@ -15,7 +15,9 @@ type ManagerShellProps = {
 }
 
 const NAV_ITEMS = [
+  { href: '/dashboard', label: 'Dashboard', icon: '◫' },
   { href: '/publish', label: '发布记录', icon: '{}' },
+  { href: '/mail', label: '邮件工作台', icon: '✉' },
   { href: '/settings', label: '设置', icon: '⚙' },
 ]
 

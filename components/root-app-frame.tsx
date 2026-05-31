@@ -8,7 +8,7 @@ type RootAppFrameProps = {
   children: ReactNode
 }
 
-const MANAGED_ROUTE_PREFIXES = ['/db', '/publish', '/settings']
+const MANAGED_ROUTE_PREFIXES = ['/db', '/dashboard', '/publish', '/mail', '/settings']
 
 export function RootAppFrame({ children }: RootAppFrameProps) {
   const pathname = usePathname() || ''

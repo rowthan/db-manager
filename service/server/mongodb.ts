@@ -31,6 +31,28 @@ type QueryResult = {
   fieldSource: 'schema' | 'document' | 'empty'
 }
 
+type AggregateInput = {
+  database?: string
+  collection: string
+  pipeline?: unknown
+  limit?: number
+}
+
+type AggregateResult = {
+  ok: true
+  database: string
+  collection: string
+  total: number
+  page: number
+  pageSize: number
+  skip: number
+  list: Record<string, unknown>[]
+  fields: string[]
+  fieldSource: 'schema' | 'document' | 'empty'
+  limitApplied: number
+  stageCount: number
+}
+
 type DocumentMutationResult = {
   ok: true
   database: string
@@ -46,6 +68,7 @@ type DocumentMutationInput = {
   collection: string
   _id: unknown
   document?: unknown
+  unsetFields?: unknown
 }
 
 type DocumentInsertInput = {
@@ -109,6 +132,32 @@ type SavedQuery = {
   favorite?: boolean
 }
 
+type SavedAggregation = {
+  name: string
+  pipelineText: string
+  favorite?: boolean
+}
+
+type SavedSyntaxRecord = {
+  database: string
+  collection: string
+  queryType: 'query' | 'aggregation'
+  name: string
+  favorite?: boolean
+  filterText?: string
+  projectionText?: string
+  sortText?: string
+  pageSize?: number
+  findOne?: boolean
+  pipelineText?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+type SavedSyntaxListItem = SavedSyntaxRecord & {
+  ok: true
+}
+
 type IndexSyncConflict = {
   field: string
   kind: 'conflict' | 'create_failed' | 'drop_failed'
@@ -135,6 +184,7 @@ type CollectionConfig = {
   collection: string
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
+  savedAggregations: SavedAggregation[]
   foreignRelations?: ForeignKeyRelation[]
   indexSync?: IndexSyncSummary
   liveIndexes?: CollectionIndexInfo[]
@@ -147,6 +197,51 @@ type CollectionConfigInput = {
   collection: string
   fieldSettings?: FieldSetting[]
   savedQueries?: SavedQuery[]
+  savedAggregations?: SavedAggregation[]
+}
+
+type DashboardWidgetConfig = {
+  id: string
+  title: string
+  description?: string
+  database?: string
+  collection: string
+  sourceKind: 'queryValue' | 'queryCount' | 'aggregateValue'
+  sourceName?: string
+  sourceQueryType?: 'query' | 'aggregation'
+  filterText?: string
+  projectionText?: string
+  sortText?: string
+  pipelineText?: string
+  valuePath?: string
+  valueType?: 'text' | 'number' | 'currency' | 'percent' | 'json'
+  prefix?: string
+  suffix?: string
+  emptyText?: string
+  decimals?: number
+  size?: 'sm' | 'wide' | 'tall' | 'hero'
+}
+
+type DashboardConfig = {
+  ok: true
+  id: string
+  title: string
+  description: string
+  slots: (DashboardWidgetConfig | null)[]
+  createdAt?: string
+  updatedAt?: string
+}
+
+type DashboardConfigListResult = {
+  ok: true
+  items: DashboardConfig[]
+}
+
+type DashboardConfigInput = {
+  id?: string
+  title?: string
+  description?: string
+  slots?: unknown
 }
 
 type PublishRecordQuerySnapshot = {
@@ -216,6 +311,7 @@ type MongoMeta = {
 
 let cachedClient: Promise<MongoClient> | null = null
 const CONFIG_COLLECTION = '_collection_config'
+const QUERY_COLLECTION = '_queries'
 const PUBLISH_RECORDS_COLLECTION = '_publish_records'
 
 function readConfig(): MongoConfig {
@@ -402,6 +498,27 @@ function normalizeQuery(value: unknown) {
   return ensurePlainObject(parsed)
 }
 
+function normalizePipeline(value: unknown) {
+  const parsed = normalizeInput(value)
+  if (!Array.isArray(parsed)) {
+    throw new Error('aggregation pipeline 必须是 JSON 数组')
+  }
+
+  return parsed.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`pipeline 第 ${index + 1} 个 stage 必须是对象`)
+    }
+
+    const stage = item as Record<string, unknown>
+    const operator = Object.keys(stage)[0]
+    if (operator === '$out' || operator === '$merge') {
+      throw new Error(`预览模式暂不支持 ${operator}，请移除后再运行`)
+    }
+
+    return stage
+  })
+}
+
 function flattenSchemaProperties(
   schema: any,
   prefix = '',
@@ -492,6 +609,21 @@ function normalizeInsertDocument(value: unknown) {
   }
 
   return output
+}
+
+function normalizeUnsetFields(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .filter((item) => item !== '_id')
+    )
+  )
 }
 
 function extractFieldsFromDocument(doc?: Record<string, unknown> | null) {
@@ -877,6 +1009,238 @@ function normalizeSavedQueries(input: unknown): SavedQuery[] {
   return output
 }
 
+function normalizeSavedAggregations(input: unknown): SavedAggregation[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+  const output: SavedAggregation[] = []
+
+  for (const item of input) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+
+    const name = String((item as Record<string, unknown>).name || '').trim()
+    const pipelineText = String((item as Record<string, unknown>).pipelineText || '[]').trim() || '[]'
+    if (!name || seen.has(name)) {
+      continue
+    }
+
+    seen.add(name)
+    output.push({
+      name,
+      pipelineText,
+      favorite: (item as Record<string, unknown>).favorite === true,
+    })
+  }
+
+  return output
+}
+
+function normalizeSavedSyntaxRecord(input: unknown): SavedSyntaxRecord | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null
+  }
+
+  const record = input as Record<string, unknown>
+  const database = String(record.database || '').trim()
+  const collection = String(record.collection || '').trim()
+  const name = String(record.name || '').trim()
+  const queryType = String(record.queryType || '').trim()
+
+  if (!database || !collection || !name || !['query', 'aggregation'].includes(queryType)) {
+    return null
+  }
+
+  return {
+    database,
+    collection,
+    queryType: queryType as SavedSyntaxRecord['queryType'],
+    name,
+    favorite: record.favorite === true,
+    filterText: typeof record.filterText === 'string' ? record.filterText : undefined,
+    projectionText: typeof record.projectionText === 'string' ? record.projectionText : undefined,
+    sortText: typeof record.sortText === 'string' ? record.sortText : undefined,
+    pageSize: Number.isFinite(Number(record.pageSize)) ? Math.max(1, Number(record.pageSize)) : undefined,
+    findOne: record.findOne === true,
+    pipelineText: typeof record.pipelineText === 'string' ? record.pipelineText : undefined,
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
+  }
+}
+
+function normalizeSavedSyntaxRecords(input: unknown): SavedSyntaxRecord[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const output: SavedSyntaxRecord[] = []
+  const seen = new Set<string>()
+
+  for (const item of input) {
+    const normalized = normalizeSavedSyntaxRecord(item)
+    if (!normalized) {
+      continue
+    }
+
+    const dedupeKey = `${normalized.queryType}::${normalized.name}`
+    if (seen.has(dedupeKey)) {
+      continue
+    }
+
+    seen.add(dedupeKey)
+    output.push(normalized)
+  }
+
+  return output
+}
+
+function convertSavedSyntaxRecordsToLegacy(records: SavedSyntaxRecord[]) {
+  const savedQueries: SavedQuery[] = []
+  const savedAggregations: SavedAggregation[] = []
+
+  for (const record of records) {
+    if (record.queryType === 'query') {
+      savedQueries.push({
+        name: record.name,
+        filterText: record.filterText || '{}',
+        projectionText: record.projectionText || '{}',
+        sortText: record.sortText || '{}',
+        pageSize: Math.max(1, Number(record.pageSize || 10)),
+        findOne: record.findOne === true,
+        favorite: record.favorite === true,
+      })
+      continue
+    }
+
+    savedAggregations.push({
+      name: record.name,
+      pipelineText: record.pipelineText || '[]',
+      favorite: record.favorite === true,
+    })
+  }
+
+  return {
+    savedQueries,
+    savedAggregations,
+  }
+}
+
+function convertLegacySavedSyntaxToRecords(
+  database: string,
+  collection: string,
+  savedQueries: SavedQuery[],
+  savedAggregations: SavedAggregation[]
+) {
+  const now = new Date().toISOString()
+
+  return [
+    ...savedQueries.map((item) => ({
+      database,
+      collection,
+      queryType: 'query' as const,
+      name: item.name,
+      favorite: item.favorite === true,
+      filterText: item.filterText || '{}',
+      projectionText: item.projectionText || '{}',
+      sortText: item.sortText || '{}',
+      pageSize: Math.max(1, Number(item.pageSize || 10)),
+      findOne: item.findOne === true,
+      createdAt: now,
+      updatedAt: now,
+    })),
+    ...savedAggregations.map((item) => ({
+      database,
+      collection,
+      queryType: 'aggregation' as const,
+      name: item.name,
+      favorite: item.favorite === true,
+      pipelineText: item.pipelineText || '[]',
+      createdAt: now,
+      updatedAt: now,
+    })),
+  ]
+}
+
+function normalizeDashboardWidget(value: unknown): DashboardWidgetConfig | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+
+  const record = value as Record<string, unknown>
+  const id = String(record.id || '').trim()
+  const title = String(record.title || '').trim()
+  const collection = String(record.collection || '').trim()
+  const sourceKind = String(record.sourceKind || '').trim()
+  const valueType = String(record.valueType || '').trim()
+  const size = String(record.size || '').trim()
+
+  if (!id || !title || !collection) {
+    return null
+  }
+
+  if (!['queryValue', 'queryCount', 'aggregateValue'].includes(sourceKind)) {
+    return null
+  }
+
+  return {
+    id,
+    title,
+    description: String(record.description || '').trim() || undefined,
+    database: String(record.database || '').trim() || undefined,
+    collection,
+    sourceKind: sourceKind as DashboardWidgetConfig['sourceKind'],
+    sourceName: String(record.sourceName || '').trim() || undefined,
+    sourceQueryType: ['query', 'aggregation'].includes(String(record.sourceQueryType || '').trim())
+      ? (String(record.sourceQueryType || '').trim() as DashboardWidgetConfig['sourceQueryType'])
+      : undefined,
+    filterText: String(record.filterText || '').trim() || undefined,
+    projectionText: String(record.projectionText || '').trim() || undefined,
+    sortText: String(record.sortText || '').trim() || undefined,
+    pipelineText: String(record.pipelineText || '').trim() || undefined,
+    valuePath: String(record.valuePath || '').trim() || undefined,
+    valueType: ['text', 'number', 'currency', 'percent', 'json'].includes(valueType)
+      ? (valueType as DashboardWidgetConfig['valueType'])
+      : 'text',
+    prefix: String(record.prefix || '').trim() || undefined,
+    suffix: String(record.suffix || '').trim() || undefined,
+    emptyText: String(record.emptyText || '').trim() || undefined,
+    decimals: Number.isFinite(Number(record.decimals))
+      ? Math.max(0, Math.min(Number(record.decimals), 6))
+      : undefined,
+    size: ['sm', 'wide', 'tall', 'hero'].includes(size) ? (size as DashboardWidgetConfig['size']) : 'sm',
+  }
+}
+
+function normalizeDashboardSlots(input: unknown): (DashboardWidgetConfig | null)[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input.map((item) => normalizeDashboardWidget(item))
+}
+
+function normalizeDashboardConfig(doc: unknown): DashboardConfig | null {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return null
+  }
+
+  const record = doc as Record<string, unknown>
+  const id = String(record.id || 'main').trim() || 'main'
+
+  return {
+    ok: true,
+    id,
+    title: String(record.title || '数据看板').trim() || '数据看板',
+    description: String(record.description || '').trim(),
+    slots: normalizeDashboardSlots(record.slots),
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
+  }
+}
+
 function buildManagedIndexName(field: string) {
   return `cfg__${field}`
 }
@@ -1079,6 +1443,7 @@ function normalizeCollectionConfig(doc: unknown): CollectionConfig | null {
     collection,
     fieldSettings: normalizeFieldSettings(record.fieldSettings),
     savedQueries: normalizeSavedQueries(record.savedQueries),
+    savedAggregations: normalizeSavedAggregations(record.savedAggregations),
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
   }
@@ -1207,6 +1572,159 @@ function createEmptyCollectionConfig(database: string, collection: string): Coll
     collection,
     fieldSettings: [],
     savedQueries: [],
+    savedAggregations: [],
+  }
+}
+
+function createEmptyDashboardConfig(id = 'main'): DashboardConfig {
+  return {
+    ok: true,
+    id,
+    title: '数据看板',
+    description: '把常用统计和关键字段固定在一个可编辑的数据控制台里。',
+    slots: [],
+  }
+}
+
+async function loadSavedSyntaxRecords(db: Db, database: string, collection: string) {
+  const queryCollection = await getSavedQueryCollection(db)
+  const docs = await queryCollection
+    .find({
+      kind: 'saved_query',
+      database,
+      collection,
+      queryType: { $in: ['query', 'aggregation'] },
+    })
+    .sort({ favorite: -1, updatedAt: -1, createdAt: -1, name: 1 })
+    .toArray()
+
+  return normalizeSavedSyntaxRecords(docs)
+}
+
+export async function listSavedSyntaxRecords(input?: {
+  database?: string
+  collection?: string
+}): Promise<SavedSyntaxListItem[]> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const database = String(input?.database || '').trim()
+  if (!database) {
+    throw new Error('database 不能为空')
+  }
+
+  const client = await getMongoClient()
+  const db = client.db(database)
+  const queryCollection = await getSavedQueryCollection(db)
+  const collection = String(input?.collection || '').trim()
+  const docs = await queryCollection
+    .find({
+      kind: 'saved_query',
+      database,
+      ...(collection ? { collection } : {}),
+      queryType: { $in: ['query', 'aggregation'] },
+    })
+    .sort({ favorite: -1, updatedAt: -1, createdAt: -1, name: 1 })
+    .toArray()
+
+  return normalizeSavedSyntaxRecords(docs).map((item) => ({
+    ok: true as const,
+    ...item,
+  }))
+}
+
+async function replaceSavedSyntaxRecords(
+  db: Db,
+  database: string,
+  collection: string,
+  records: SavedSyntaxRecord[]
+) {
+  const queryCollection = await getSavedQueryCollection(db)
+  const now = new Date().toISOString()
+
+  await queryCollection.deleteMany({
+    database,
+    collection,
+    queryType: { $in: ['query', 'aggregation'] },
+  })
+
+  if (!records.length) {
+    return
+  }
+
+  await queryCollection.insertMany(
+    records.map((record) => ({
+      kind: 'saved_query',
+      database,
+      collection,
+      queryType: record.queryType,
+      name: record.name,
+      favorite: record.favorite === true,
+      filterText: record.filterText,
+      projectionText: record.projectionText,
+      sortText: record.sortText,
+      pageSize: record.pageSize,
+      findOne: record.findOne === true,
+      pipelineText: record.pipelineText,
+      createdAt: record.createdAt || now,
+      updatedAt: now,
+    }))
+  )
+}
+
+async function migrateLegacySavedSyntaxIfNeeded(
+  db: Db,
+  configCollection: Awaited<ReturnType<typeof getConfigCollection>>,
+  legacyConfig: CollectionConfig | null
+) {
+  if (!legacyConfig) {
+    return {
+      savedQueries: [] as SavedQuery[],
+      savedAggregations: [] as SavedAggregation[],
+    }
+  }
+
+  const records = await loadSavedSyntaxRecords(db, legacyConfig.database, legacyConfig.collection)
+  if (records.length) {
+    return convertSavedSyntaxRecordsToLegacy(records)
+  }
+
+  const legacySavedQueries = normalizeSavedQueries(legacyConfig.savedQueries)
+  const legacySavedAggregations = normalizeSavedAggregations(legacyConfig.savedAggregations)
+  if (!legacySavedQueries.length && !legacySavedAggregations.length) {
+    return {
+      savedQueries: [],
+      savedAggregations: [],
+    }
+  }
+
+  const migratedRecords = convertLegacySavedSyntaxToRecords(
+    legacyConfig.database,
+    legacyConfig.collection,
+    legacySavedQueries,
+    legacySavedAggregations
+  )
+
+  await replaceSavedSyntaxRecords(db, legacyConfig.database, legacyConfig.collection, migratedRecords)
+  await configCollection.updateOne(
+    {
+      kind: 'collection',
+      database: legacyConfig.database,
+      collection: legacyConfig.collection,
+    },
+    {
+      $unset: {
+        savedQueries: '',
+        savedAggregations: '',
+      },
+    }
+  )
+
+  return {
+    savedQueries: legacySavedQueries,
+    savedAggregations: legacySavedAggregations,
   }
 }
 
@@ -1232,6 +1750,20 @@ async function getFieldsFromSchema(
 
 async function getConfigCollection(db: Db) {
   return db.collection(CONFIG_COLLECTION)
+}
+
+async function getSavedQueryCollection(db: Db) {
+  return db.collection(QUERY_COLLECTION)
+}
+
+async function getSystemConfigCollection(client: MongoClient) {
+  const database = getSystemDatabaseName()
+  if (!database) {
+    throw new Error('缺少默认数据库，无法保存 dashboard 配置')
+  }
+
+  const db = client.db(database)
+  return getConfigCollection(db)
 }
 
 async function getPublishRecordCollection(db: Db) {
@@ -1274,9 +1806,12 @@ export async function getCollectionConfig(
     .toArray()
   const relations = normalizeForeignRelations(relationDocs)
   const normalized = normalizeCollectionConfig(doc) || createEmptyCollectionConfig(database, collection)
+  const savedSyntax = await migrateLegacySavedSyntaxIfNeeded(db, configCollection, normalized)
 
   return {
     ...normalized,
+    savedQueries: savedSyntax.savedQueries,
+    savedAggregations: savedSyntax.savedAggregations,
     fieldSettings: mergeFieldSettingsWithRelations(
       database,
       collection,
@@ -1316,6 +1851,7 @@ export async function saveCollectionConfig(
   const now = new Date().toISOString()
   const fieldSettings = normalizeFieldSettings(input.fieldSettings)
   const savedQueries = normalizeSavedQueries(input.savedQueries)
+  const savedAggregations = normalizeSavedAggregations(input.savedAggregations)
   const foreignRelations = buildForeignRelations(database, collection, fieldSettings)
   const indexSync = await syncCollectionIndexes(db, collection, fieldSettings)
 
@@ -1331,7 +1867,6 @@ export async function saveCollectionConfig(
         database,
         collection,
         fieldSettings: stripForeignKeysFromSettings(fieldSettings),
-        savedQueries,
         updatedAt: now,
       },
       $setOnInsert: {
@@ -1339,6 +1874,13 @@ export async function saveCollectionConfig(
       },
     },
     { upsert: true }
+  )
+
+  await replaceSavedSyntaxRecords(
+    db,
+    database,
+    collection,
+    convertLegacySavedSyntaxToRecords(database, collection, savedQueries, savedAggregations)
   )
 
   await Promise.all(
@@ -1388,6 +1930,8 @@ export async function saveCollectionConfig(
 
   return {
     ...(normalizeCollectionConfig(saved) || createEmptyCollectionConfig(database, collection)),
+    savedQueries,
+    savedAggregations,
     fieldSettings: mergeFieldSettingsWithRelations(
       database,
       collection,
@@ -1397,6 +1941,111 @@ export async function saveCollectionConfig(
     foreignRelations: normalizeForeignRelations(savedRelations),
     indexSync,
     liveIndexes: await getCollectionLiveIndexes(db, collection),
+  }
+}
+
+export async function getDashboardConfig(id = 'main'): Promise<DashboardConfig> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const client = await getMongoClient()
+  const configCollection = await getSystemConfigCollection(client)
+  const doc = await configCollection.findOne({
+    kind: 'dashboard',
+    id,
+  })
+
+  return normalizeDashboardConfig(doc) || createEmptyDashboardConfig(id)
+}
+
+export async function listDashboardConfigs(): Promise<DashboardConfigListResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const client = await getMongoClient()
+  const configCollection = await getSystemConfigCollection(client)
+  const docs = await configCollection
+    .find({
+      kind: 'dashboard',
+    })
+    .sort({ updatedAt: -1, createdAt: -1, id: 1 })
+    .toArray()
+
+  const items = docs.map((item) => normalizeDashboardConfig(item)).filter((item): item is DashboardConfig => Boolean(item))
+  return {
+    ok: true,
+    items: items.length ? items : [createEmptyDashboardConfig('main')],
+  }
+}
+
+export async function saveDashboardConfig(input: DashboardConfigInput): Promise<DashboardConfig> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const client = await getMongoClient()
+  const configCollection = await getSystemConfigCollection(client)
+  const id = String(input.id || 'main').trim() || 'main'
+  const now = new Date().toISOString()
+  const title = String(input.title || '数据看板').trim() || '数据看板'
+  const description = String(input.description || '').trim()
+  const slots = normalizeDashboardSlots(input.slots)
+
+  await configCollection.updateOne(
+    {
+      kind: 'dashboard',
+      id,
+    },
+    {
+      $set: {
+        kind: 'dashboard',
+        id,
+        title,
+        description,
+        slots,
+        updatedAt: now,
+      },
+      $setOnInsert: {
+        createdAt: now,
+      },
+    },
+    { upsert: true }
+  )
+
+  const saved = await configCollection.findOne({
+    kind: 'dashboard',
+    id,
+  })
+
+  return normalizeDashboardConfig(saved) || createEmptyDashboardConfig(id)
+}
+
+export async function deleteDashboardConfig(id: string) {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const normalizedId = String(id || '').trim()
+  if (!normalizedId) {
+    throw new Error('dashboard id 不能为空')
+  }
+
+  const client = await getMongoClient()
+  const configCollection = await getSystemConfigCollection(client)
+  await configCollection.deleteOne({
+    kind: 'dashboard',
+    id: normalizedId,
+  })
+
+  return {
+    ok: true as const,
+    id: normalizedId,
   }
 }
 
@@ -1656,6 +2305,53 @@ export async function queryMongoDocuments(input: QueryInput): Promise<QueryResul
   }
 }
 
+export async function aggregateMongoDocuments(input: AggregateInput): Promise<AggregateResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  if (!input.collection) {
+    throw new Error('collection 不能为空')
+  }
+
+  const client = await getMongoClient()
+  const database = input.database || config.defaultDatabase || getCollectionName(config.uri)
+  if (!database) {
+    throw new Error('database 不能为空，请在请求中指定或配置 MONGODB_DB')
+  }
+
+  const db: Db = client.db(database)
+  const collection = db.collection(input.collection)
+  const pipeline = normalizePipeline(input.pipeline)
+  const limit = Math.max(1, Math.min(Number(input.limit || 50), 200))
+  const finalPipeline = [...pipeline, { $limit: limit }]
+  const list = await collection.aggregate(finalPipeline).toArray()
+  const serializedList = list.map((item) => serializeValue(item) as Record<string, unknown>)
+  const fieldsFromSchema = await getFieldsFromSchema(db, input.collection)
+  const fieldsFromDoc = extractFieldsFromDocuments(serializedList)
+  const fields = fieldsFromDoc.length ? fieldsFromDoc : fieldsFromSchema
+
+  return {
+    ok: true,
+    database,
+    collection: input.collection,
+    total: serializedList.length,
+    page: 0,
+    pageSize: limit,
+    skip: 0,
+    list: serializedList,
+    fields,
+    fieldSource: fieldsFromDoc.length
+      ? 'document'
+      : fieldsFromSchema.length
+        ? 'schema'
+        : 'empty',
+    limitApplied: limit,
+    stageCount: pipeline.length,
+  }
+}
+
 export async function createMongoCollection(input: CollectionCreateInput): Promise<CollectionCreateResult> {
   const config = readConfig()
   if (!config.uri) {
@@ -1712,10 +2408,31 @@ export async function updateMongoDocument(
   }
 
   const rawDocument = removeIdField(input.document)
+  const unsetFields = normalizeUnsetFields(input.unsetFields)
   const client = await getMongoClient()
   const db = client.db(database)
   const collection = db.collection(input.collection)
-  const result = await collection.updateOne({ _id: id as any }, { $set: rawDocument })
+  const updatePayload: Record<string, unknown> = {}
+
+  if (Object.keys(rawDocument).length) {
+    updatePayload.$set = rawDocument
+  }
+
+  if (unsetFields.length) {
+    updatePayload.$unset = Object.fromEntries(unsetFields.map((field) => [field, '']))
+  }
+
+  if (!Object.keys(updatePayload).length) {
+    return {
+      ok: true,
+      database,
+      collection: input.collection,
+      matchedCount: 1,
+      modifiedCount: 0,
+    }
+  }
+
+  const result = await collection.updateOne({ _id: id as any }, updatePayload)
 
   return {
     ok: true,

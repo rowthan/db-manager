@@ -14,12 +14,14 @@ import {
 } from '@radix-ui/react-icons'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import type {
+  MongoAggregationResult,
   MongoMeta,
   MongoQueryResult,
   QueryForm,
   FieldSetting,
   ForeignKeySetting,
   SavedQuery,
+  SavedAggregation,
   CollectionConfig,
   QueryDoc,
   DocumentModalState,
@@ -49,6 +51,8 @@ const DEFAULT_FILTER = '{}'
 const DEFAULT_PROJECTION = '{}'
 const DEFAULT_SORT = '{"createAt":-1}'
 const DEFAULT_PAGE_SIZE = 10
+const DEFAULT_AGGREGATION_PIPELINE = '[]'
+const DEFAULT_AGGREGATION_LIMIT = 50
 const STORAGE_DATABASE_KEY = 'db-page:selected-database'
 const STORAGE_COLLECTION_KEY = 'db-page:selected-collection'
 const STORAGE_WORKSPACE_TABS_KEY = 'db-page:workspace-tabs'
@@ -60,6 +64,42 @@ type DatabasePageClientProps = {
 }
 
 type WorkspaceContentTab = 'documents' | 'aggregations' | 'schema' | 'indexes' | 'validation'
+type AggregationEditorMode = 'stages' | 'text'
+
+type AggregationStageDraft = {
+  id: string
+  operator: string
+  bodyText: string
+  enabled: boolean
+  collapsed: boolean
+}
+
+type AggregationWorkspaceState = {
+  pipelineText: string
+  editorMode: AggregationEditorMode
+  stages: AggregationStageDraft[]
+  selectedSavedAggregationName: string
+  result: MongoAggregationResult | null
+  error: string
+}
+
+type DocumentChangePlan = {
+  setOps: Record<string, unknown>
+  unsetPaths: string[]
+}
+
+type DocumentSaveConfirmState = {
+  open: boolean
+  title: string
+  description: string
+  previewText: string
+  method: 'POST' | 'PUT'
+  bodyPayload: Record<string, unknown>
+  openPublishAfterSave: boolean
+  savedDocument: QueryDoc | null
+  database: string
+  collection: string
+}
 
 type WorkspaceTab = {
   id: string
@@ -70,9 +110,96 @@ type WorkspaceTab = {
   result: MongoQueryResult | null
   queryError: string
   collectionConfig: CollectionConfig | null
+  aggregation: AggregationWorkspaceState
 }
 
 type StoredWorkspaceTab = Pick<WorkspaceTab, 'id' | 'database' | 'collection' | 'form' | 'view'>
+
+const DEFAULT_AGGREGATION_STAGE_TEMPLATES: { label: string; operator: string; body: string }[] = [
+  { label: '$match', operator: '$match', body: '{}' },
+  { label: '$project', operator: '$project', body: '{\n  "_id": 0\n}' },
+  { label: '$group', operator: '$group', body: '{\n  "_id": "$uid",\n  "count": { "$sum": 1 }\n}' },
+  { label: '$sort', operator: '$sort', body: '{\n  "createAt": -1\n}' },
+  { label: '$limit', operator: '$limit', body: '20' },
+  {
+    label: '$lookup',
+    operator: '$lookup',
+    body: '{\n  "from": "users",\n  "localField": "uid",\n  "foreignField": "uid",\n  "as": "user"\n}',
+  },
+  { label: '$unwind', operator: '$unwind', body: '"$user"' },
+]
+
+const AGGREGATION_STAGE_GUIDES: Record<
+  string,
+  {
+    title: string
+    summary: string
+    syntax: string
+    tips: string[]
+    demo: string
+  }
+> = {
+  $match: {
+    title: '筛选文档',
+    summary: '使用查询条件过滤输入文档，语法和普通 Mongo 查询条件基本一致。',
+    syntax: '{ "field": value }',
+    tips: ['支持 $and / $or / $in / $gte 等操作符', '能尽量前置时，通常会让后续 stage 更轻'],
+    demo: '{\n  "activeId": "createOrder",\n  "deleted": false\n}',
+  },
+  $group: {
+    title: '分组汇总',
+    summary: '按照一个 key 分组，并在每组内做计数、求和、去重等聚合计算。',
+    syntax: '{ "_id": "$field", "count": { "$sum": 1 } }',
+    tips: ['必须提供 _id 作为分组键', '常见累计器有 $sum / $avg / $push / $addToSet'],
+    demo: '{\n  "_id": "$uid",\n  "count": { "$sum": 1 }\n}',
+  },
+  $lookup: {
+    title: '关联集合',
+    summary: '把当前集合和另一个 collection 做关联，结果通常会生成一个数组字段。',
+    syntax: '{ "from": "users", "localField": "uid", "foreignField": "uid", "as": "user" }',
+    tips: ['from 是目标 collection 名', '如果只想取单条结果，常和 $unwind 连用'],
+    demo: '{\n  "from": "users",\n  "localField": "uid",\n  "foreignField": "uid",\n  "as": "user"\n}',
+  },
+  $unwind: {
+    title: '展开数组',
+    summary: '把数组字段拆成多条文档，适合处理 $lookup 后的关联结果或原始数组字段。',
+    syntax: '"$arrayField" 或 { "path": "$arrayField", "preserveNullAndEmptyArrays": true }',
+    tips: ['输入为数组时会按元素拆分', '可选 preserveNullAndEmptyArrays 保留空值'],
+    demo: '"$user"',
+  },
+  $project: {
+    title: '投影字段',
+    summary: '控制输出字段，或者基于表达式生成新字段。',
+    syntax: '{ "field": 1, "newField": "$otherField", "_id": 0 }',
+    tips: ['1 表示保留字段，0 表示排除字段', '也可以写表达式计算新字段'],
+    demo: '{\n  "_id": 0,\n  "uid": 1,\n  "activeId": 1,\n  "remark": 1\n}',
+  },
+  $sort: {
+    title: '排序结果',
+    summary: '按照一个或多个字段排序，1 为升序，-1 为降序。',
+    syntax: '{ "fieldA": 1, "fieldB": -1 }',
+    tips: ['常放在筛选和分组之后', '大数据量排序要注意索引和内存消耗'],
+    demo: '{\n  "createAt": -1,\n  "_id": -1\n}',
+  },
+  $limit: {
+    title: '限制条数',
+    summary: '只保留前 N 条结果，常用于预览或和 $sort 组合取 Top N。',
+    syntax: '20',
+    tips: ['内容是数字，不是对象', '和 $sort 搭配时表示取排序后的前 N 条'],
+    demo: '20',
+  },
+}
+
+function createDefaultAggregationState(): AggregationWorkspaceState {
+  return {
+    pipelineText: DEFAULT_AGGREGATION_PIPELINE,
+    editorMode: 'stages',
+    stages: [],
+    selectedSavedAggregationName: '',
+    result: null,
+    error: '',
+  }
+}
 
 const WORKSPACE_CONTENT_TAB_ITEMS: {
   key: WorkspaceContentTab
@@ -118,6 +245,10 @@ function parseStoredWorkspaceTabs(raw: string | null): WorkspaceTab[] {
       }
 
       const form = candidate.form as Partial<QueryForm>
+      const aggregationCandidate =
+        candidate && typeof candidate === 'object' && 'aggregation' in candidate
+          ? (candidate as { aggregation?: Partial<AggregationWorkspaceState> }).aggregation
+          : null
       if (
         typeof form.database !== 'string' ||
         typeof form.collection !== 'string' ||
@@ -140,6 +271,47 @@ function parseStoredWorkspaceTabs(raw: string | null): WorkspaceTab[] {
           result: null,
           queryError: '',
           collectionConfig: null,
+          aggregation: {
+            pipelineText:
+              typeof aggregationCandidate?.pipelineText === 'string'
+                ? aggregationCandidate.pipelineText
+                : DEFAULT_AGGREGATION_PIPELINE,
+            stages: (() => {
+              if (Array.isArray(aggregationCandidate?.stages)) {
+                return aggregationCandidate.stages
+                  .filter((item) => Boolean(item) && typeof item === 'object')
+                  .map((item) => {
+                    const record = item as Record<string, unknown>
+                    return (
+                    createAggregationStageDraft(
+                      typeof record.operator === 'string' ? record.operator : '$match',
+                      typeof record.bodyText === 'string' ? record.bodyText : '{}',
+                      record.enabled !== false,
+                      record.collapsed === true
+                    )
+                    )
+                  })
+              }
+
+              try {
+                return buildAggregationStageDraftsFromPipelineText(
+                  typeof aggregationCandidate?.pipelineText === 'string'
+                    ? aggregationCandidate.pipelineText
+                    : DEFAULT_AGGREGATION_PIPELINE
+                )
+              } catch {
+                return []
+              }
+            })(),
+            editorMode:
+              aggregationCandidate?.editorMode === 'text' ? 'text' : 'stages',
+            selectedSavedAggregationName:
+              typeof aggregationCandidate?.selectedSavedAggregationName === 'string'
+                ? aggregationCandidate.selectedSavedAggregationName
+                : '',
+            result: null,
+            error: typeof aggregationCandidate?.error === 'string' ? aggregationCandidate.error : '',
+          },
           form: {
             database: form.database,
             collection: form.collection,
@@ -200,6 +372,87 @@ function parseJson(text: string) {
   const trimmed = text.trim()
   if (!trimmed) return {}
   return JSON.parse(trimmed)
+}
+
+function createAggregationStageDraft(
+  operator = '$match',
+  bodyText = '{}',
+  enabled = true,
+  collapsed = false
+): AggregationStageDraft {
+  return {
+    id: createDocumentFieldDraftId(),
+    operator,
+    bodyText,
+    enabled,
+    collapsed,
+  }
+}
+
+function parseAggregationPipelineText(text: string) {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return [] as Record<string, unknown>[]
+  }
+
+  const parsed = JSON.parse(trimmed)
+  if (!Array.isArray(parsed)) {
+    throw new Error('Pipeline 需要以 JSON 数组作为根节点')
+  }
+
+  return parsed.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`第 ${index + 1} 个 stage 必须是对象`)
+    }
+
+    return item as Record<string, unknown>
+  })
+}
+
+function buildAggregationStageDraftsFromPipelineText(text: string) {
+  const stages = parseAggregationPipelineText(text)
+  if (!stages.length) {
+    return [] as AggregationStageDraft[]
+  }
+
+  return stages.map((stage, index) => {
+    const entries = Object.entries(stage)
+    if (entries.length !== 1) {
+      throw new Error(`第 ${index + 1} 个 stage 需要只包含一个操作符`)
+    }
+
+    const [operator, body] = entries[0]
+    return createAggregationStageDraft(operator, prettyJson(body))
+  })
+}
+
+function buildAggregationPipelineTextFromDrafts(drafts: AggregationStageDraft[]) {
+  const pipeline = drafts.map((draft, index) => {
+    if (!draft.enabled) {
+      return null
+    }
+
+    const operator = draft.operator.trim()
+    if (!operator) {
+      throw new Error(`第 ${index + 1} 个 stage 需要填写操作符`)
+    }
+
+    if (!operator.startsWith('$')) {
+      throw new Error(`第 ${index + 1} 个 stage 操作符需要以 $ 开头`)
+    }
+
+    const bodyText = draft.bodyText.trim()
+    if (!bodyText) {
+      throw new Error(`第 ${index + 1} 个 stage 需要填写内容`)
+    }
+
+    return {
+      [operator]: JSON.parse(bodyText),
+    }
+  })
+  .filter((item): item is Record<string, unknown> => Boolean(item))
+
+  return prettyJson(pipeline)
 }
 
 function parseMongoDocumentJson(text: string) {
@@ -866,6 +1119,98 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function removeDocumentIdField(value: QueryDoc | Record<string, unknown> | null | undefined) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  const output = { ...(value as Record<string, unknown>) }
+  delete output._id
+  return output
+}
+
+function areValuesDeepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true
+  }
+
+  if (left === null || right === null) {
+    return left === right
+  }
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false
+    }
+    return left.every((item, index) => areValuesDeepEqual(item, right[index]))
+  }
+
+  if (isPlainRecord(left) || isPlainRecord(right)) {
+    if (!isPlainRecord(left) || !isPlainRecord(right)) {
+      return false
+    }
+
+    const leftKeys = Object.keys(left)
+    const rightKeys = Object.keys(right)
+    if (leftKeys.length !== rightKeys.length) {
+      return false
+    }
+
+    return leftKeys.every((key) => areValuesDeepEqual(left[key], right[key]))
+  }
+
+  return false
+}
+
+function buildDocumentChangePlan(
+  original: Record<string, unknown>,
+  next: Record<string, unknown>,
+  basePath = ''
+): DocumentChangePlan {
+  const setOps: Record<string, unknown> = {}
+  const unsetPaths: string[] = []
+  const keys = new Set([...Object.keys(original), ...Object.keys(next)])
+
+  for (const key of keys) {
+    const path = basePath ? `${basePath}.${key}` : key
+    const leftValue = original[key]
+    const rightValue = next[key]
+
+    if (rightValue === undefined) {
+      if (leftValue !== undefined) {
+        unsetPaths.push(path)
+      }
+      continue
+    }
+
+    if (leftValue === undefined) {
+      setOps[path] = rightValue
+      continue
+    }
+
+    if (areValuesDeepEqual(leftValue, rightValue)) {
+      continue
+    }
+
+    if (
+      isPlainRecord(leftValue) &&
+      isPlainRecord(rightValue)
+    ) {
+      const childPlan = buildDocumentChangePlan(leftValue, rightValue, path)
+      Object.assign(setOps, childPlan.setOps)
+      unsetPaths.push(...childPlan.unsetPaths)
+      continue
+    }
+
+    setOps[path] = rightValue
+  }
+
+  return {
+    setOps,
+    unsetPaths,
+  }
+}
+
 function buildStructuredObjectDefaultValue(setting?: FieldSetting) {
   const output: Record<string, unknown> = {}
   for (const child of setting?.children || []) {
@@ -945,6 +1290,21 @@ function inferStructuredChildren(setting: FieldSetting | undefined, value: unkno
       children: inferStructuredChildren(undefined, sampleValue),
     }
   })
+}
+
+function buildTransientStructuredSetting(
+  key: string,
+  type: 'object' | 'array',
+  value: unknown
+): FieldSetting {
+  return {
+    key,
+    visible: true,
+    required: false,
+    dataType: type,
+    dataTypes: [type],
+    children: inferStructuredChildren(undefined, value),
+  }
 }
 
 function validateStructuredValue(
@@ -2638,7 +2998,7 @@ function StructuredDocumentFieldEditor({
                         const childValue = itemValue[child.key]
                         const childPath = `${itemPath}.${child.key}`
                         return (
-                          <div key={childPath} className="grid gap-2 md:grid-cols-[180px_minmax(0,1fr)]">
+                          <div key={childPath} className="space-y-2">
                             <div className="rounded-lg border border-base-300 bg-base-100 px-3 py-2">
                               <div className="text-sm font-medium">{child.key}</div>
                               <div className="text-xs text-base-content/50">
@@ -2686,7 +3046,7 @@ function StructuredDocumentFieldEditor({
           const childValue = currentObject[child.key]
           const childPath = fieldPath ? `${fieldPath}.${child.key}` : child.key
           return (
-            <div key={childPath} className="grid gap-2 md:grid-cols-[180px_minmax(0,1fr)]">
+            <div key={childPath} className="space-y-2">
               <div className="rounded-lg border border-base-300 bg-base-200 px-3 py-2">
                 <div className="text-sm font-medium">{child.key}</div>
                 <div className="text-xs text-base-content/50">
@@ -2876,6 +3236,24 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const [savingConfig, setSavingConfig] = useState(false)
   const [queryError, setQueryError] = useState('')
   const [result, setResult] = useState<MongoQueryResult | null>(null)
+  const [loadingAggregation, setLoadingAggregation] = useState(false)
+  const [aggregationResult, setAggregationResult] = useState<MongoAggregationResult | null>(null)
+  const [aggregationError, setAggregationError] = useState('')
+  const [aggregationPipelineText, setAggregationPipelineText] = useState(DEFAULT_AGGREGATION_PIPELINE)
+  const [aggregationEditorMode, setAggregationEditorMode] = useState<AggregationEditorMode>('stages')
+  const [aggregationStages, setAggregationStages] = useState<AggregationStageDraft[]>([])
+  const [selectedSavedAggregationName, setSelectedSavedAggregationName] = useState('')
+  const [aggregationStagePreviews, setAggregationStagePreviews] = useState<
+    Record<
+      string,
+      {
+        loading: boolean
+        error: string
+        result: MongoAggregationResult | null
+      }
+    >
+  >({})
+  const [aggregationCollectionTotal, setAggregationCollectionTotal] = useState<number | null>(null)
   const [filterBuilderOpen, setFilterBuilderOpen] = useState(false)
   const [filterBuilderDrafts, setFilterBuilderDrafts] = useState<FilterConditionDraft[]>([
     createEmptyFilterConditionDraft(),
@@ -2938,6 +3316,18 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     database: '',
     collection: '',
   })
+  const [documentSaveConfirm, setDocumentSaveConfirm] = useState<DocumentSaveConfirmState>({
+    open: false,
+    title: '',
+    description: '',
+    previewText: '',
+    method: 'PUT',
+    bodyPayload: {},
+    openPublishAfterSave: false,
+    savedDocument: null,
+    database: '',
+    collection: '',
+  })
   const [documentTableDraft, setDocumentTableDraft] = useState<DocumentFieldDraft[]>([])
   const [documentArrayDrafts, setDocumentArrayDrafts] = useState<Record<string, string[]>>({})
   const [deleteModal, setDeleteModal] = useState<DeleteModalState>({
@@ -2973,6 +3363,8 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const formRef = useRef<QueryForm | null>(null)
   const queryRequestSeqRef = useRef(0)
   const latestQueryRequestIdByTabRef = useRef<Record<string, number>>({})
+  const aggregationRequestSeqRef = useRef(0)
+  const latestAggregationRequestIdByTabRef = useRef<Record<string, number>>({})
   const latestCollectionConfigKeyRef = useRef('')
   const [form, setForm] = useState<QueryForm>({
     database: '',
@@ -3028,6 +3420,16 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         setResult(restoredActiveWorkspaceTab?.result || null)
         setQueryError(restoredActiveWorkspaceTab?.queryError || '')
         setCollectionConfig(restoredActiveWorkspaceTab?.collectionConfig || null)
+        setAggregationResult(restoredActiveWorkspaceTab?.aggregation.result || null)
+        setAggregationError(restoredActiveWorkspaceTab?.aggregation.error || '')
+        setAggregationPipelineText(
+          restoredActiveWorkspaceTab?.aggregation.pipelineText || DEFAULT_AGGREGATION_PIPELINE
+        )
+        setAggregationEditorMode(restoredActiveWorkspaceTab?.aggregation.editorMode || 'stages')
+        setAggregationStages(restoredActiveWorkspaceTab?.aggregation.stages || [])
+        setSelectedSavedAggregationName(
+          restoredActiveWorkspaceTab?.aggregation.selectedSavedAggregationName || ''
+        )
       }
 
       if (database || collection) {
@@ -3089,6 +3491,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         setResult(existing.result)
         setQueryError(existing.queryError)
         setCollectionConfig(existing.collectionConfig)
+        setAggregationResult(existing.aggregation.result)
+        setAggregationError(existing.aggregation.error)
+        setAggregationPipelineText(existing.aggregation.pipelineText)
+        setAggregationEditorMode(existing.aggregation.editorMode)
+        setAggregationStages(existing.aggregation.stages)
+        setSelectedSavedAggregationName(existing.aggregation.selectedSavedAggregationName)
         setForm(boundExistingForm)
         setActiveWorkspaceTabId(existing.id)
       }
@@ -3228,6 +3636,17 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   }, [form.database, form.collection])
 
   useEffect(() => {
+    const database = activeWorkspaceTab?.database || form.database
+    const collection = activeWorkspaceTab?.collection || form.collection
+    if (!database || !collection) {
+      setAggregationCollectionTotal(null)
+      return
+    }
+
+    void loadAggregationCollectionTotal(database, collection)
+  }, [activeWorkspaceTab?.collection, activeWorkspaceTab?.database, form.collection, form.database])
+
+  useEffect(() => {
     if (!form.database || !form.collection) {
       return
     }
@@ -3286,9 +3705,45 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     })
   }, [activeWorkspaceTabId, form])
 
+  useEffect(() => {
+    if (!activeWorkspaceTabId) {
+      return
+    }
+
+    setWorkspaceTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === activeWorkspaceTabId
+          ? {
+              ...tab,
+              aggregation: {
+                pipelineText: aggregationPipelineText,
+                editorMode: aggregationEditorMode,
+                stages: aggregationStages,
+                selectedSavedAggregationName,
+                result: aggregationResult,
+                error: aggregationError,
+              },
+            }
+          : tab
+      )
+    )
+  }, [
+    activeWorkspaceTabId,
+    aggregationEditorMode,
+    aggregationError,
+    aggregationPipelineText,
+    aggregationStages,
+    aggregationResult,
+    selectedSavedAggregationName,
+  ])
+
   const collectionOptions = useMemo(() => meta?.collections || [], [meta])
   const fieldSettings = useMemo(() => collectionConfig?.fieldSettings || [], [collectionConfig?.fieldSettings])
   const availableFields = useMemo(() => getAvailableFields(result, fieldSettings), [fieldSettings, result])
+  const aggregationAvailableFields = useMemo(
+    () => getAvailableFields(aggregationResult as MongoQueryResult | null, fieldSettings),
+    [aggregationResult, fieldSettings]
+  )
   const fieldSettingsByKey = useMemo(
     () => new Map(fieldSettings.map((item) => [item.key, item])),
     [fieldSettings]
@@ -3297,6 +3752,26 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     () => mergeFieldSettingsForView(availableFields, fieldSettings),
     [availableFields, fieldSettings]
   )
+  const aggregationVisibleFields = useMemo(
+    () => mergeFieldSettingsForView(aggregationAvailableFields, fieldSettings),
+    [aggregationAvailableFields, fieldSettings]
+  )
+  const aggregationStageDrafts = useMemo(() => aggregationStages, [aggregationStages])
+  const aggregationPipelineParseError = useMemo(() => {
+    try {
+      buildAggregationPipelineTextFromDrafts(aggregationStageDrafts)
+      return ''
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Pipeline 格式不正确'
+    }
+  }, [aggregationStageDrafts])
+  const aggregationPipelineTextValue = useMemo(() => {
+    try {
+      return buildAggregationPipelineTextFromDrafts(aggregationStageDrafts)
+    } catch {
+      return aggregationPipelineText
+    }
+  }, [aggregationPipelineText, aggregationStageDrafts])
   const foreignKeyRelationsByField = useMemo(() => {
     const output = new Map<string, ForeignLookupRelation[]>()
 
@@ -3569,6 +4044,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         collection,
         fieldSettings: [],
         savedQueries: [],
+        savedAggregations: [],
       }
 
       if (targetTabId) {
@@ -3598,6 +4074,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   async function persistCollectionConfig(nextConfig: {
     fieldSettings?: FieldSetting[]
     savedQueries?: SavedQuery[]
+    savedAggregations?: SavedAggregation[]
   }) {
     if (!form.database || !form.collection) {
       setQueryError('请先选择数据库和集合')
@@ -3616,6 +4093,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
           collection: form.collection.trim(),
           fieldSettings: nextConfig.fieldSettings ?? collectionConfig?.fieldSettings ?? [],
           savedQueries: nextConfig.savedQueries ?? collectionConfig?.savedQueries ?? [],
+          savedAggregations: nextConfig.savedAggregations ?? collectionConfig?.savedAggregations ?? [],
         }),
       })
       const data = (await response.json()) as CollectionConfig & { error?: string }
@@ -3726,6 +4204,192 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     }
   }
 
+  async function requestAggregationPreview(
+    database: string,
+    collection: string,
+    pipeline: Record<string, unknown>[],
+    limit = DEFAULT_AGGREGATION_LIMIT
+  ) {
+    const response = await fetch('/api/db/aggregate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        database,
+        collection,
+        pipeline,
+        limit,
+      }),
+    })
+
+    const data = (await response.json()) as MongoAggregationResult
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'MongoDB 聚合失败')
+    }
+
+    return data
+  }
+
+  async function loadAggregationCollectionTotal(database: string, collection: string) {
+    try {
+      const response = await fetch('/api/db/query', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          database,
+          collection,
+          filter: {},
+          projection: {},
+          sort: {},
+          page: 0,
+          pageSize: 1,
+          findOne: false,
+        }),
+      })
+
+      const data = (await response.json()) as MongoQueryResult
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || '读取集合数据量失败')
+      }
+
+      setAggregationCollectionTotal(typeof data.total === 'number' ? data.total : null)
+    } catch {
+      setAggregationCollectionTotal(null)
+    }
+  }
+
+  async function executeAggregation(
+    stageDrafts = aggregationStageDrafts,
+    targetTabId = activeWorkspaceTabIdRef.current
+  ) {
+    const database = activeWorkspaceTab?.database || form.database
+    const collection = activeWorkspaceTab?.collection || form.collection
+
+    if (!database || !collection) {
+      setAggregationError('请先选择数据库和集合')
+      return
+    }
+
+    const requestId = ++aggregationRequestSeqRef.current
+    const shouldSyncActiveState = !targetTabId || activeWorkspaceTabIdRef.current === targetTabId
+    if (targetTabId) {
+      latestAggregationRequestIdByTabRef.current[targetTabId] = requestId
+    }
+
+    if (shouldSyncActiveState) {
+      setLoadingAggregation(true)
+      setAggregationError('')
+      setAggregationStagePreviews({})
+    }
+
+    try {
+      const pipelineText = buildAggregationPipelineTextFromDrafts(stageDrafts)
+      const parsedPipeline = parseAggregationPipelineText(pipelineText)
+      const data = await requestAggregationPreview(database, collection, parsedPipeline, DEFAULT_AGGREGATION_LIMIT)
+      const enabledStages = stageDrafts.filter((stage) => stage.enabled)
+      const previewEntries = await Promise.all(
+        enabledStages.map(async (stage, index) => {
+          try {
+            const partialPipeline = parseAggregationPipelineText(
+              buildAggregationPipelineTextFromDrafts(enabledStages.slice(0, index + 1))
+            )
+            const preview = await requestAggregationPreview(database, collection, partialPipeline, 10)
+            return [stage.id, { loading: false, error: '', result: preview }] as const
+          } catch (error) {
+            return [
+              stage.id,
+              {
+                loading: false,
+                error: error instanceof Error ? error.message : '预览失败',
+                result: null,
+              },
+            ] as const
+          }
+        })
+      )
+      const nextAggregationError = ''
+      const isLatestRequest =
+        !targetTabId || latestAggregationRequestIdByTabRef.current[targetTabId] === requestId
+
+      if (!isLatestRequest) {
+        return
+      }
+
+      if (targetTabId) {
+        setWorkspaceTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === targetTabId
+              ? {
+                  ...tab,
+                  aggregation: {
+                    ...tab.aggregation,
+                    pipelineText,
+                    stages: stageDrafts,
+                    result: data,
+                    error: nextAggregationError,
+                  },
+                }
+              : tab
+          )
+        )
+      }
+
+      if (!targetTabId || activeWorkspaceTabIdRef.current === targetTabId) {
+        setAggregationPipelineText(pipelineText)
+        setAggregationResult(data)
+        setAggregationError(nextAggregationError)
+        setAggregationStagePreviews(
+          Object.fromEntries(
+            previewEntries.map(([stageId, preview]) => [stageId, preview])
+          )
+        )
+      }
+    } catch (error) {
+      const nextAggregationError = error instanceof Error ? error.message : 'MongoDB 聚合失败'
+      const isLatestRequest =
+        !targetTabId || latestAggregationRequestIdByTabRef.current[targetTabId] === requestId
+
+      if (!isLatestRequest) {
+        return
+      }
+
+      if (targetTabId) {
+        setWorkspaceTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === targetTabId
+              ? {
+                  ...tab,
+                  aggregation: {
+                    ...tab.aggregation,
+                    pipelineText: aggregationPipelineText,
+                    stages: stageDrafts,
+                    error: nextAggregationError,
+                  },
+                }
+              : tab
+          )
+        )
+      }
+
+      if (!targetTabId || activeWorkspaceTabIdRef.current === targetTabId) {
+        setAggregationError(nextAggregationError)
+      }
+    } finally {
+      const isLatestRequest =
+        !targetTabId || latestAggregationRequestIdByTabRef.current[targetTabId] === requestId
+      if (!isLatestRequest) {
+        return
+      }
+
+      if (!targetTabId || activeWorkspaceTabIdRef.current === targetTabId) {
+        setLoadingAggregation(false)
+      }
+    }
+  }
+
   function openEditDocument(doc: QueryDoc, database = form.database, collection = form.collection) {
     const draft = buildDocumentFieldDraft(doc)
     setDocumentModal({
@@ -3799,6 +4463,18 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     })
     setDocumentTableDraft([])
     setDocumentArrayDrafts({})
+    setDocumentSaveConfirm({
+      open: false,
+      title: '',
+      description: '',
+      previewText: '',
+      method: 'PUT',
+      bodyPayload: {},
+      openPublishAfterSave: false,
+      savedDocument: null,
+      database: '',
+      collection: '',
+    })
   }
 
   function openBulkUpdateDocuments(docs: QueryDoc[], database = form.database, collection = form.collection) {
@@ -4176,6 +4852,120 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     setDocumentTableDraft((prev) => prev.filter((_, currentIndex) => currentIndex !== index))
   }
 
+  const documentDraftState = useMemo(() => {
+    if (!documentModal.open) {
+      return {
+        payload: null as Record<string, unknown> | null,
+        error: '',
+        changePlan: null as DocumentChangePlan | null,
+        hasChanges: false,
+        previewText: '',
+      }
+    }
+
+    try {
+      let payload: Record<string, unknown>
+
+      if (documentModal.mode === 'table') {
+        const syncedDraft = syncDocumentArrayDrafts(
+          documentTableDraft,
+          documentArrayDrafts,
+          fieldSettingsByKey
+        )
+        payload = serializeDocumentFieldDraft(syncedDraft)
+      } else {
+        payload = parseMongoDocumentJson(documentModal.text)
+      }
+
+      payload = serializeDocumentPayloadWithSettings(payload, fieldSettings)
+
+      const structureError = validateDocumentPayloadStructure(payload, fieldSettings)
+      if (structureError) {
+        return {
+          payload: null,
+          error: structureError,
+          changePlan: null,
+          hasChanges: false,
+          previewText: '',
+        }
+      }
+
+      if (documentModal.action === 'bulk') {
+        const hasChanges = Object.keys(payload).length > 0
+        return {
+          payload,
+          error: hasChanges ? '' : '请至少填写一个字段',
+          changePlan: {
+            setOps: payload,
+            unsetPaths: [],
+          },
+          hasChanges,
+          previewText: prettyJson({ $set: payload }),
+        }
+      }
+
+      const requiredError = validateDocumentPayloadWithSettings(payload, fieldSettings)
+      if (requiredError) {
+        return {
+          payload: null,
+          error: requiredError,
+          changePlan: null,
+          hasChanges: false,
+          previewText: '',
+        }
+      }
+
+      if (documentModal.action === 'create') {
+        return {
+          payload,
+          error: '',
+          changePlan: {
+            setOps: payload,
+            unsetPaths: [],
+          },
+          hasChanges: true,
+          previewText: prettyJson(payload),
+        }
+      }
+
+      const originalPayload = removeDocumentIdField(documentModal.doc)
+      const changePlan = buildDocumentChangePlan(originalPayload, payload)
+      const hasChanges =
+        Object.keys(changePlan.setOps).length > 0 || changePlan.unsetPaths.length > 0
+
+      return {
+        payload,
+        error: '',
+        changePlan,
+        hasChanges,
+        previewText: prettyJson({
+          ...(Object.keys(changePlan.setOps).length ? { $set: changePlan.setOps } : {}),
+          ...(changePlan.unsetPaths.length
+            ? { $unset: Object.fromEntries(changePlan.unsetPaths.map((path) => [path, ''])) }
+            : {}),
+        }),
+      }
+    } catch (error) {
+      return {
+        payload: null,
+        error: error instanceof Error ? error.message : '文档格式不正确',
+        changePlan: null,
+        hasChanges: false,
+        previewText: '',
+      }
+    }
+  }, [
+    documentArrayDrafts,
+    documentModal.action,
+    documentModal.doc,
+    documentModal.mode,
+    documentModal.open,
+    documentModal.text,
+    documentTableDraft,
+    fieldSettings,
+    fieldSettingsByKey,
+  ])
+
   function openDeleteDocument(doc: QueryDoc, database = form.database, collection = form.collection) {
     setDeleteModal({
       open: true,
@@ -4220,39 +5010,22 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       return
     }
 
-    setMutatingDocument(true)
     setDocumentModal((prev) => ({
       ...prev,
       error: '',
     }))
 
     try {
-      let documentPayload: Record<string, unknown>
-
-      if (documentModal.mode === 'table') {
-        const syncedDraft = syncDocumentArrayDrafts(documentTableDraft, documentArrayDrafts, fieldSettingsByKey)
-        setDocumentTableDraft(syncedDraft)
-        documentPayload = serializeDocumentFieldDraft(syncedDraft)
-      } else {
-        documentPayload = parseMongoDocumentJson(documentModal.text)
+      if (documentDraftState.error) {
+        throw new Error(documentDraftState.error)
       }
 
-      documentPayload = serializeDocumentPayloadWithSettings(documentPayload, fieldSettings)
-
-      const structureError = validateDocumentPayloadStructure(documentPayload, fieldSettings)
-      if (structureError) {
-        throw new Error(structureError)
+      if (!documentDraftState.payload || !documentDraftState.changePlan) {
+        throw new Error('没有可提交的数据')
       }
 
-      if (documentModal.action === 'bulk' && !Object.keys(documentPayload).length) {
-        throw new Error('请至少填写一个字段')
-      }
-
-      if (documentModal.action !== 'bulk') {
-        const requiredError = validateDocumentPayloadWithSettings(documentPayload, fieldSettings)
-        if (requiredError) {
-          throw new Error(requiredError)
-        }
+      if (!documentDraftState.hasChanges) {
+        throw new Error('当前没有变更内容')
       }
 
       if (documentModal.action === 'bulk') {
@@ -4261,6 +5034,92 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
           throw new Error('未找到可批量更新的记录')
         }
 
+        setDocumentSaveConfirm({
+          open: true,
+          title: '确认批量修改',
+          description: `将对 ${docs.length} 条记录应用以下变更，只提交发生变化的字段。`,
+          previewText: documentDraftState.previewText,
+          method: 'PUT',
+          bodyPayload: {
+            database: documentModal.database.trim(),
+            collection: documentModal.collection.trim(),
+            document: documentDraftState.changePlan.setOps,
+            unsetFields: documentDraftState.changePlan.unsetPaths,
+          },
+          openPublishAfterSave,
+          savedDocument: null,
+          database: documentModal.database.trim(),
+          collection: documentModal.collection.trim(),
+        })
+        return
+      }
+
+      const savedDocument: QueryDoc = {
+        ...documentDraftState.payload,
+      }
+
+      const method = documentModal.action === 'create' ? 'POST' : 'PUT'
+      const bodyPayload =
+        documentModal.action === 'create'
+          ? {
+              database: documentModal.database.trim(),
+              collection: documentModal.collection.trim(),
+              document: documentDraftState.payload,
+            }
+          : {
+              database: documentModal.database.trim(),
+              collection: documentModal.collection.trim(),
+              _id: documentModal.doc?._id,
+              document: documentDraftState.changePlan.setOps,
+              unsetFields: documentDraftState.changePlan.unsetPaths,
+            }
+
+      setDocumentSaveConfirm({
+        open: true,
+        title:
+          documentModal.action === 'create'
+            ? '确认新增文档'
+            : openPublishAfterSave
+              ? '确认保存并发布'
+              : '确认保存修改',
+        description:
+          documentModal.action === 'create'
+            ? '请确认即将写入的新文档内容。'
+            : '请确认以下变更，提交时只会发送发生变化的字段。',
+        previewText: documentDraftState.previewText,
+        method,
+        bodyPayload,
+        openPublishAfterSave,
+        savedDocument,
+        database: documentModal.database.trim(),
+        collection: documentModal.collection.trim(),
+      })
+    } catch (error) {
+      setDocumentModal((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : '保存失败',
+      }))
+    }
+  }
+
+  async function saveAndPublishDocumentChanges() {
+    await saveDocumentChanges(true)
+  }
+
+  async function confirmDocumentSave() {
+    if (!documentSaveConfirm.open) {
+      return
+    }
+
+    setMutatingDocument(true)
+    setDocumentModal((prev) => ({
+      ...prev,
+      error: '',
+    }))
+
+    try {
+      if (documentModal.action === 'bulk') {
+        const docs = documentModal.docs.filter((doc) => doc && doc._id !== undefined && doc._id !== null)
         const results = await Promise.allSettled(
           docs.map(async (doc) => {
             const response = await fetch('/api/db/document', {
@@ -4269,13 +5128,8 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                 'Content-Type': 'application/json',
               },
               body: JSON.stringify({
-                database: documentModal.database.trim(),
-                collection: documentModal.collection.trim(),
+                ...documentSaveConfirm.bodyPayload,
                 _id: doc._id,
-                document: {
-                  ...documentPayload,
-                  _id: doc._id,
-                },
               }),
             })
 
@@ -4288,6 +5142,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         )
 
         const failed = results.filter((item) => item.status === 'rejected') as PromiseRejectedResult[]
+        setDocumentSaveConfirm((prev) => ({ ...prev, open: false }))
         if (!failed.length) {
           closeEditDocument()
           setResultSelectionResetVersion((version) => version + 1)
@@ -4299,34 +5154,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         throw new Error(`批量更新完成，但有 ${failed.length} 条失败：${failed[0]?.reason instanceof Error ? failed[0].reason.message : '保存失败'}`)
       }
 
-      const savedDocument: QueryDoc = {
-        ...documentPayload,
-      }
-
-      const method = documentModal.action === 'create' ? 'POST' : 'PUT'
-      const bodyPayload =
-        documentModal.action === 'create'
-          ? {
-              database: documentModal.database.trim(),
-              collection: documentModal.collection.trim(),
-              document: documentPayload,
-            }
-          : {
-              database: documentModal.database.trim(),
-              collection: documentModal.collection.trim(),
-              _id: documentModal.doc?._id,
-              document: {
-                ...documentPayload,
-                _id: documentModal.doc?._id,
-              },
-            }
-
       const response = await fetch('/api/db/document', {
-        method,
+        method: documentSaveConfirm.method,
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(bodyPayload),
+        body: JSON.stringify(documentSaveConfirm.bodyPayload),
       })
 
       const data = (await response.json()) as { ok?: boolean; error?: string; insertedId?: unknown }
@@ -4334,17 +5167,23 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         throw new Error(data.error || '保存失败')
       }
 
-      if (documentModal.action === 'create' && data.insertedId !== undefined) {
+      const savedDocument = documentSaveConfirm.savedDocument
+        ? { ...documentSaveConfirm.savedDocument }
+        : null
+
+      if (documentModal.action === 'create' && data.insertedId !== undefined && savedDocument) {
         savedDocument._id = data.insertedId
-      } else if (documentModal.doc?._id !== undefined) {
+      } else if (documentModal.doc?._id !== undefined && savedDocument) {
         savedDocument._id = documentModal.doc._id
       }
 
-      if (openPublishAfterSave) {
+      setDocumentSaveConfirm((prev) => ({ ...prev, open: false }))
+
+      if (documentSaveConfirm.openPublishAfterSave && savedDocument) {
         closeEditDocument()
         setResultSelectionResetVersion((version) => version + 1)
         await executeQuery()
-        openExportDocuments([savedDocument], documentModal.database, documentModal.collection)
+        openExportDocuments([savedDocument], documentSaveConfirm.database, documentSaveConfirm.collection)
         return
       }
 
@@ -4359,10 +5198,6 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     } finally {
       setMutatingDocument(false)
     }
-  }
-
-  async function saveAndPublishDocumentChanges() {
-    await saveDocumentChanges(true)
   }
 
   async function confirmDeleteDocument() {
@@ -4481,6 +5316,69 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     await persistCollectionConfig({
       fieldSettings: collectionConfig?.fieldSettings || [],
       savedQueries,
+    })
+  }
+
+  async function saveAggregationPreset(saveAsFavorite = false) {
+    const name =
+      window.prompt('输入要保存的 pipeline 名称', selectedSavedAggregationName || '')?.trim() || ''
+    if (!name) {
+      return
+    }
+
+    const savedAggregations = [...(collectionConfig?.savedAggregations || [])]
+    const existingPreset = savedAggregations.find((item) => item.name === name)
+    const nextPreset: SavedAggregation = {
+      name,
+      pipelineText: aggregationPipelineTextValue,
+      favorite: saveAsFavorite || existingPreset?.favorite === true,
+    }
+    const index = savedAggregations.findIndex((item) => item.name === name)
+    if (index >= 0) {
+      savedAggregations[index] = nextPreset
+    } else {
+      savedAggregations.unshift(nextPreset)
+    }
+
+    const data = await persistCollectionConfig({
+      fieldSettings: collectionConfig?.fieldSettings || [],
+      savedQueries: collectionConfig?.savedQueries || [],
+      savedAggregations,
+    })
+    if (data) {
+      setSelectedSavedAggregationName(name)
+    }
+  }
+
+  function applySavedAggregation(preset: SavedAggregation) {
+    setSelectedSavedAggregationName(preset.name)
+    setAggregationPipelineText(preset.pipelineText || DEFAULT_AGGREGATION_PIPELINE)
+    try {
+      setAggregationStages(buildAggregationStageDraftsFromPipelineText(preset.pipelineText || '[]'))
+      setAggregationError('')
+    } catch (error) {
+      setAggregationError(error instanceof Error ? error.message : 'Pipeline 格式不正确')
+    }
+    setAggregationResult(null)
+    setAggregationStagePreviews({})
+  }
+
+  async function toggleSavedAggregationFavorite(name: string) {
+    const savedAggregations = [...(collectionConfig?.savedAggregations || [])]
+    const index = savedAggregations.findIndex((item) => item.name === name)
+    if (index < 0) {
+      return
+    }
+
+    savedAggregations[index] = {
+      ...savedAggregations[index],
+      favorite: !savedAggregations[index]?.favorite,
+    }
+
+    await persistCollectionConfig({
+      fieldSettings: collectionConfig?.fieldSettings || [],
+      savedQueries: collectionConfig?.savedQueries || [],
+      savedAggregations,
     })
   }
 
@@ -4624,6 +5522,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       result: null,
       queryError: '',
       collectionConfig: null,
+      aggregation: createDefaultAggregationState(),
     }
   }
 
@@ -4651,6 +5550,10 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     lastAutoQueryKeyRef.current = ''
     setResult(null)
     setQueryError('')
+    setAggregationResult(null)
+    setAggregationError('')
+    setAggregationStagePreviews({})
+    setAggregationCollectionTotal(null)
 
     if (existing) {
       const boundExistingForm = bindFormToWorkspaceTarget(
@@ -4663,6 +5566,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       setResult(existing.result)
       setQueryError(existing.queryError)
       setCollectionConfig(existing.collectionConfig)
+      setAggregationResult(existing.aggregation.result)
+      setAggregationError(existing.aggregation.error)
+      setAggregationPipelineText(existing.aggregation.pipelineText)
+      setAggregationEditorMode(existing.aggregation.editorMode)
+      setAggregationStages(existing.aggregation.stages)
+      setSelectedSavedAggregationName(existing.aggregation.selectedSavedAggregationName)
       syncWorkspaceRoute(existing.database, existing.collection)
       void executeQuery(boundExistingForm, existing.id)
       return
@@ -4675,6 +5584,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     setResult(nextTab.result)
     setQueryError(nextTab.queryError)
     setCollectionConfig(nextTab.collectionConfig)
+    setAggregationResult(nextTab.aggregation.result)
+    setAggregationError(nextTab.aggregation.error)
+    setAggregationPipelineText(nextTab.aggregation.pipelineText)
+    setAggregationEditorMode(nextTab.aggregation.editorMode)
+    setAggregationStages(nextTab.aggregation.stages)
+    setSelectedSavedAggregationName(nextTab.aggregation.selectedSavedAggregationName)
     syncWorkspaceRoute(database, collection)
     void executeQuery(tabForm, nextTab.id)
   }
@@ -4700,6 +5615,14 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     lastAutoQueryKeyRef.current = ''
     setResult(null)
     setQueryError('')
+    setAggregationResult(tab.aggregation.result)
+    setAggregationError(tab.aggregation.error)
+    setAggregationPipelineText(tab.aggregation.pipelineText)
+    setAggregationEditorMode(tab.aggregation.editorMode)
+    setAggregationStages(tab.aggregation.stages)
+    setSelectedSavedAggregationName(tab.aggregation.selectedSavedAggregationName)
+    setAggregationStagePreviews({})
+    setAggregationCollectionTotal(null)
     setActiveWorkspaceTabId(tabId)
     setForm(boundTabForm)
     setResult(tab.result)
@@ -4732,6 +5655,14 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         setResult(nextActive.result)
         setQueryError(nextActive.queryError)
         setCollectionConfig(nextActive.collectionConfig)
+        setAggregationResult(nextActive.aggregation.result)
+        setAggregationError(nextActive.aggregation.error)
+        setAggregationPipelineText(nextActive.aggregation.pipelineText)
+        setAggregationEditorMode(nextActive.aggregation.editorMode)
+        setAggregationStages(nextActive.aggregation.stages)
+        setSelectedSavedAggregationName(nextActive.aggregation.selectedSavedAggregationName)
+        setAggregationStagePreviews({})
+        setAggregationCollectionTotal(null)
         syncWorkspaceRoute(nextActive.database, nextActive.collection)
         void executeQuery(boundNextForm, nextActive.id)
       }
@@ -4748,6 +5679,63 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     setWorkspaceTabs((prev) =>
       prev.map((tab) => (tab.id === activeWorkspaceTabId ? { ...tab, view: nextView } : tab))
     )
+  }
+
+  function setAggregationStageDrafts(nextDrafts: AggregationStageDraft[]) {
+    setAggregationStages(nextDrafts)
+    setSelectedSavedAggregationName('')
+    try {
+      setAggregationPipelineText(buildAggregationPipelineTextFromDrafts(nextDrafts))
+    } catch {
+      // Keep the last editable text when drafts are temporarily invalid.
+    }
+  }
+
+  function appendAggregationStage(operator: string, bodyText: string) {
+    const nextDrafts = [...aggregationStageDrafts, createAggregationStageDraft(operator, bodyText)]
+    setAggregationStageDrafts(nextDrafts)
+  }
+
+  function updateAggregationStage(
+    stageId: string,
+    updater: (draft: AggregationStageDraft) => AggregationStageDraft
+  ) {
+    setAggregationStageDrafts(
+      aggregationStageDrafts.map((draft) => (draft.id === stageId ? updater(draft) : draft))
+    )
+  }
+
+  function removeAggregationStage(stageId: string) {
+    setAggregationStageDrafts(aggregationStageDrafts.filter((draft) => draft.id !== stageId))
+  }
+
+  function moveAggregationStage(stageId: string, direction: -1 | 1) {
+    const currentIndex = aggregationStageDrafts.findIndex((draft) => draft.id === stageId)
+    if (currentIndex < 0) {
+      return
+    }
+
+    const targetIndex = currentIndex + direction
+    setAggregationStageDrafts(moveListItem(aggregationStageDrafts, currentIndex, targetIndex))
+  }
+
+  function resetAggregationPipeline() {
+    setAggregationPipelineText(DEFAULT_AGGREGATION_PIPELINE)
+    setAggregationStages([])
+    setAggregationResult(null)
+    setAggregationError('')
+    setAggregationStagePreviews({})
+    setSelectedSavedAggregationName('')
+  }
+
+  function handleAggregationTextChange(nextText: string) {
+    setAggregationPipelineText(nextText)
+    setSelectedSavedAggregationName('')
+    try {
+      setAggregationStages(buildAggregationStageDraftsFromPipelineText(nextText))
+    } catch {
+      // Keep editing text even when JSON is temporarily invalid.
+    }
   }
 
   function resetConditions() {
@@ -5267,7 +6255,9 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
   const foreignLookupSections = buildForeignLookupSections()
   const savedQueries = collectionConfig?.savedQueries || []
+  const savedAggregations = collectionConfig?.savedAggregations || []
   const favoriteQueries = savedQueries.filter((preset) => preset.favorite)
+  const favoriteAggregations = savedAggregations.filter((preset) => preset.favorite)
   const commonQueryPresets = buildCommonQueryPresets()
   const documentModalTitle =
     documentModal.action === 'create'
@@ -6016,21 +7006,392 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   }
 
   function renderAggregationWorkspace() {
+    const enabledStages = aggregationStageDrafts.filter((stage) => stage.enabled)
+    const stageTypeOptions = Array.from(
+      new Set(DEFAULT_AGGREGATION_STAGE_TEMPLATES.map((item) => item.operator))
+    )
+    const dataSourceLabel =
+      aggregationCollectionTotal === null ? '读取中...' : `${aggregationCollectionTotal} Documents in the collection`
+
+    function renderPreviewCards(viewResult: MongoAggregationResult | null, loading: boolean) {
+      if (loading) {
+        return <div className="px-4 py-8 text-sm text-base-content/50">正在生成预览...</div>
+      }
+
+      if (!viewResult?.list?.length) {
+        return <div className="px-4 py-8 text-sm text-base-content/50">当前 stage 运行后暂无结果。</div>
+      }
+
+      return (
+        <div className="flex gap-3 overflow-x-auto px-4 py-4">
+          {viewResult.list.slice(0, 3).map((doc, index) => (
+            <div
+              key={String(doc._id ?? index)}
+              className="min-w-[320px] rounded-2xl border border-base-300 bg-base-100 p-4"
+            >
+              <pre className="overflow-x-auto text-xs leading-6 text-base-content/80">
+                <code>{prettyJson(doc)}</code>
+              </pre>
+            </div>
+          ))}
+        </div>
+      )
+    }
+
     return (
-      <section className="rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-4 shadow-sm">
-        <div>
-          <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-base-content/60">Aggregations</h3>
-          <div className="mt-1 text-sm text-base-content/55">
-            这里先对齐 Compass 的页签结构，聚合工作区保留给下一步继续增强。
+      <div className="space-y-4">
+        <section className="rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] shadow-sm">
+          <div className="border-b border-base-300 px-4 py-3">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="flex min-w-0 flex-1 items-center gap-3 overflow-x-auto">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/10 text-primary">
+                  <span className="text-lg">▣</span>
+                </div>
+                <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto">
+                  {enabledStages.length ? (
+                    enabledStages.map((stage, index) => (
+                      <div
+                        key={stage.id}
+                        className="shrink-0 rounded-full bg-sky-100 px-3 py-1.5 font-mono text-xs font-semibold text-sky-800"
+                      >
+                        {stage.operator}
+                        {index < enabledStages.length - 1 ? <span className="ml-1.5 text-sky-400">›</span> : null}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-base-content/50">还没有启用的 stage</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  className="select select-bordered select-sm compass-input min-w-[220px]"
+                  value={selectedSavedAggregationName}
+                  onChange={(e) => {
+                    const nextName = e.target.value
+                    setSelectedSavedAggregationName(nextName)
+                    const matched = savedAggregations.find((item) => item.name === nextName)
+                    if (matched) {
+                      applySavedAggregation(matched)
+                    }
+                  }}
+                >
+                  <option value="">选择已保存的 pipeline</option>
+                  {favoriteAggregations.map((preset) => (
+                    <option key={preset.name} value={preset.name}>
+                      ★ {preset.name}
+                    </option>
+                  ))}
+                  {savedAggregations
+                    .filter((preset) => !preset.favorite)
+                    .map((preset) => (
+                      <option key={preset.name} value={preset.name}>
+                        {preset.name}
+                      </option>
+                    ))}
+                </select>
+                {selectedSavedAggregationName ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm px-2"
+                    onClick={() => void toggleSavedAggregationFavorite(selectedSavedAggregationName)}
+                    title="收藏或取消收藏当前 pipeline"
+                  >
+                    {savedAggregations.find((item) => item.name === selectedSavedAggregationName)?.favorite
+                      ? '★'
+                      : '☆'}
+                  </button>
+                ) : null}
+                <button type="button" className="btn btn-outline btn-sm" onClick={() => void saveAggregationPreset()}>
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => void saveAggregationPreset(true)}
+                >
+                  Favorite
+                </button>
+                <div className="join">
+                  <button
+                    type="button"
+                    className={`btn btn-sm join-item ${aggregationEditorMode === 'stages' ? 'btn-primary' : 'btn-outline'}`}
+                    onClick={() => setAggregationEditorMode('stages')}
+                  >
+                    Stages
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm join-item ${aggregationEditorMode === 'text' ? 'btn-primary' : 'btn-outline'}`}
+                    onClick={() => setAggregationEditorMode('text')}
+                  >
+                    Text
+                  </button>
+                </div>
+                <button type="button" className="btn btn-outline btn-sm" onClick={resetAggregationPipeline}>
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => void executeAggregation()}
+                  disabled={loadingAggregation || Boolean(aggregationPipelineParseError)}
+                >
+                  {loadingAggregation ? '运行中...' : 'Run'}
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="mt-4 rounded-xl border border-dashed border-base-300 bg-base-50 p-6">
-          <div className="text-sm font-medium">准备中的聚合工作台</div>
-          <div className="mt-2 text-sm text-base-content/55">
-            当前集合：{workspaceDatabase || '-'} / {workspaceCollection || '-'}。下一步可以在这里接入 pipeline builder、预览和导出。
+
+          <div className="px-4 py-4">
+            <div className="rounded-2xl border border-base-300 bg-base-100">
+              <div className="flex items-center justify-between gap-3 px-4 py-4">
+                <div className="flex items-center gap-3">
+                  <button type="button" className="btn btn-ghost btn-sm h-8 min-h-8 px-2">
+                    ▾
+                  </button>
+                  <div className="text-2xl font-semibold text-base-content/85">
+                    {aggregationCollectionTotal ?? '--'}
+                  </div>
+                  <div className="text-sm text-base-content/60">{dataSourceLabel}</div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => void loadAggregationCollectionTotal(workspaceDatabase, workspaceCollection)}
+                >
+                  刷新
+                </button>
+              </div>
+            </div>
+
+            {aggregationEditorMode === 'text' ? (
+              <div className="mt-4 rounded-2xl border border-base-300 bg-base-100 p-4">
+                <textarea
+                  className="min-h-[320px] w-full rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] px-3 py-3 font-mono text-sm outline-none focus:border-primary"
+                  value={aggregationPipelineTextValue}
+                  onChange={(e) => handleAggregationTextChange(e.target.value)}
+                  spellCheck={false}
+                  placeholder={'[\n  { "$match": { "activeId": "createOrder" } },\n  { "$group": { "_id": "$uid", "count": { "$sum": 1 } } }\n]'}
+                />
+              </div>
+            ) : null}
+
+            {aggregationEditorMode === 'stages' ? (
+              <div className="mt-4 space-y-4">
+                {aggregationStageDrafts.map((stage, index) => {
+                  const previewState = aggregationStagePreviews[stage.id]
+                  const stageGuide =
+                    AGGREGATION_STAGE_GUIDES[stage.operator] || {
+                      title: '自定义 stage',
+                      summary: '当前 stage 暂无内置说明，可以直接按 Mongo aggregation pipeline 语法编写。',
+                      syntax: '{ ... }',
+                      tips: ['建议先参考 Mongo 官方 stage 文档', '确认输出结构后再继续串联下一个 stage'],
+                      demo: stage.bodyText || '{}',
+                    }
+                  return (
+                    <section key={stage.id} className="rounded-2xl border border-base-300 bg-base-100">
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-base-300 px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm h-8 min-h-8 px-2"
+                            onClick={() =>
+                              updateAggregationStage(stage.id, (current) => ({
+                                ...current,
+                                collapsed: !current.collapsed,
+                              }))
+                            }
+                          >
+                            {stage.collapsed ? '▸' : '▾'}
+                          </button>
+                          <div className="text-lg font-semibold">Stage {index + 1}</div>
+                          <select
+                            className="select select-bordered select-sm compass-input min-w-[160px] font-mono"
+                            value={stage.operator}
+                            onChange={(e) =>
+                              updateAggregationStage(stage.id, (current) => ({
+                                ...current,
+                                operator: e.target.value,
+                              }))
+                            }
+                          >
+                            {stageTypeOptions.map((option) => (
+                              <option key={option} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                          <label className="flex items-center gap-2 text-sm text-base-content/65">
+                            <input
+                              type="checkbox"
+                              className="toggle toggle-primary toggle-sm"
+                              checked={stage.enabled}
+                              onChange={(e) =>
+                                updateAggregationStage(stage.id, (current) => ({
+                                  ...current,
+                                  enabled: e.target.checked,
+                                }))
+                              }
+                            />
+                            启用
+                          </label>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => moveAggregationStage(stage.id, -1)}
+                            disabled={index === 0}
+                          >
+                            上移
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => moveAggregationStage(stage.id, 1)}
+                            disabled={index === aggregationStageDrafts.length - 1}
+                          >
+                            下移
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs text-error"
+                            onClick={() => removeAggregationStage(stage.id)}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+
+                      {!stage.collapsed ? (
+                        <div className="grid min-h-[320px] divide-y divide-base-300 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:divide-x lg:divide-y-0">
+                          <div className="p-4">
+                            <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                              语法说明
+                            </div>
+                            <div className="rounded-2xl border border-base-300 bg-base-50 p-4">
+                              <div className="text-sm font-semibold text-base-content/85">{stageGuide.title}</div>
+                              <div className="mt-2 text-sm leading-6 text-base-content/65">{stageGuide.summary}</div>
+                              <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                                Syntax
+                              </div>
+                              <div className="mt-2 rounded-xl bg-base-100 px-3 py-2 font-mono text-xs text-base-content/80">
+                                {stageGuide.syntax}
+                              </div>
+                              <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                                Tips
+                              </div>
+                              <div className="mt-2 space-y-1 text-sm text-base-content/65">
+                                {stageGuide.tips.map((tip) => (
+                                  <div key={tip}>- {tip}</div>
+                                ))}
+                              </div>
+                              <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                                Demo
+                              </div>
+                              <pre className="mt-2 overflow-x-auto rounded-xl bg-base-100 p-3 text-xs leading-6 text-base-content/80">
+                                <code>{stageGuide.demo}</code>
+                              </pre>
+                            </div>
+                            <div className="mb-3 mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                              条件编辑
+                            </div>
+                            <textarea
+                              className="min-h-[240px] w-full rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] px-3 py-3 font-mono text-sm outline-none focus:border-primary"
+                              value={stage.bodyText}
+                              onChange={(e) =>
+                                updateAggregationStage(stage.id, (current) => ({
+                                  ...current,
+                                  bodyText: e.target.value,
+                                }))
+                              }
+                              spellCheck={false}
+                            />
+                          </div>
+
+                          <div className="p-0">
+                            <div className="flex items-center justify-between gap-2 px-4 py-4">
+                              <div className="text-sm font-medium text-base-content/80">
+                                Output preview after <span className="font-mono text-primary">{stage.operator}</span> stage
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <div className="text-xs text-base-content/45">Sample of 10 documents</div>
+                                <button
+                                  type="button"
+                                  className="btn btn-outline btn-xs"
+                                  onClick={() => void executeAggregation()}
+                                  disabled={loadingAggregation || Boolean(aggregationPipelineParseError)}
+                                >
+                                  {loadingAggregation ? '运行中...' : 'Run'}
+                                </button>
+                              </div>
+                            </div>
+                            {renderPreviewCards(previewState?.result || null, previewState?.loading === true)}
+                            {previewState?.error ? (
+                              <div className="px-4 pb-4 text-sm text-error">{previewState.error}</div>
+                            ) : null}
+                            {!previewState && !loadingAggregation ? (
+                              <div className="px-4 pb-6 text-sm text-base-content/45">可以直接点击这里的 Run 生成局部预览。</div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+                    </section>
+                  )
+                })}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {DEFAULT_AGGREGATION_STAGE_TEMPLATES.map((template) => (
+                    <button
+                      key={template.label}
+                      type="button"
+                      className="btn btn-outline btn-xs"
+                      onClick={() => appendAggregationStage(template.operator, template.body)}
+                    >
+                      + {template.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {aggregationPipelineParseError ? (
+              <div className="mt-4 rounded-xl border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">
+                {aggregationPipelineParseError}
+              </div>
+            ) : null}
+            {aggregationError ? (
+              <div className="mt-4 rounded-xl border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">
+                {aggregationError}
+              </div>
+            ) : null}
           </div>
-        </div>
-      </section>
+        </section>
+
+        <ResultViewSection
+          variant="compass"
+          title="Pipeline Output"
+          subtitle={
+            aggregationResult?.ok
+              ? `${workspaceDatabase}.${workspaceCollection} · ${enabledStages.length} 个启用 stage · 返回 ${aggregationResult.total || 0} 条`
+              : '这里显示整个 pipeline 的最终输出'
+          }
+          result={aggregationResult as MongoQueryResult | null}
+          loading={loadingAggregation}
+          availableFields={aggregationAvailableFields}
+          visibleFields={aggregationVisibleFields}
+          queryError={aggregationError}
+          onExportDocuments={(docs) => openExportDocuments(docs, workspaceDatabase, workspaceCollection)}
+          selectionResetVersion={resultSelectionResetVersion}
+          renderField={(doc, field, className) =>
+            renderFieldDisplay(doc, field, className, new Map(), workspaceDatabase, fieldSettingsByKey)
+          }
+          emptyLabel="运行 pipeline 后会在这里展示最终输出。"
+          loadingLabel="正在执行 aggregation pipeline..."
+        />
+      </div>
     )
   }
 
@@ -7864,6 +9225,11 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                     <div className="text-xs text-base-content/50">
                       左侧展示字段类型，右侧编辑值。`Date` 会以本地时间输入框展示。
                     </div>
+                    {documentModal.action === 'edit' ? (
+                      <div className="text-xs text-base-content/50">
+                        仅提交实际变更的字段；如果没有改动，保存按钮会保持禁用。
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap justify-between gap-2">
                       <button type="button" className="btn btn-outline btn-xs" onClick={addDocumentTableField}>
                         添加字段
@@ -7957,9 +9323,23 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                                 </div>
                               ) : item.type === 'object' || item.type === 'array' ? (
                                 (() => {
-                                  const setting = fieldSettingsByKey.get(item.key)
+                                  const setting =
+                                    fieldSettingsByKey.get(item.key) ||
+                                    (item.type === 'object' || item.type === 'array'
+                                      ? buildTransientStructuredSetting(
+                                          item.key,
+                                          item.type,
+                                          (() => {
+                                            try {
+                                              return item.valueText.trim() ? JSON.parse(item.valueText) : item.type === 'array' ? [] : {}
+                                            } catch {
+                                              return item.type === 'array' ? [] : {}
+                                            }
+                                          })()
+                                        )
+                                      : undefined)
 
-                                  if (setting) {
+                                  if (setting && (item.type !== 'array' || setting.children?.length)) {
                                     return (
                                       <StructuredDocumentFieldEditor
                                         setting={setting}
@@ -8076,6 +9456,9 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                 {documentModal.error ? (
                   <div className="alert alert-error py-2 text-sm">{documentModal.error}</div>
                 ) : null}
+                {!documentModal.error && documentModal.action === 'edit' && !documentDraftState.hasChanges ? (
+                  <div className="text-xs text-base-content/50">当前没有变更内容。</div>
+                ) : null}
               </div>
 
               <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-base-300 pt-3">
@@ -8086,12 +9469,24 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                   <button
                     className="btn btn-secondary btn-sm"
                     onClick={() => void saveAndPublishDocumentChanges()}
-                    disabled={mutatingDocument}
+                    disabled={
+                      mutatingDocument ||
+                      Boolean(documentDraftState.error) ||
+                      (documentModal.action !== 'create' && !documentDraftState.hasChanges)
+                    }
                   >
                     {mutatingDocument ? '保存中...' : '保存并发布'}
                   </button>
                 ) : null}
-                <button className="btn btn-primary btn-sm" onClick={() => void saveDocumentChanges()} disabled={mutatingDocument}>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => void saveDocumentChanges()}
+                  disabled={
+                    mutatingDocument ||
+                    Boolean(documentDraftState.error) ||
+                    (documentModal.action !== 'create' && !documentDraftState.hasChanges)
+                  }
+                >
                   {mutatingDocument
                     ? '保存中...'
                     : documentModal.action === 'create'
@@ -8099,6 +9494,65 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                       : documentModal.action === 'bulk'
                         ? '保存批量修改'
                       : '保存修改'}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {documentSaveConfirm.open ? (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-base-300/75 p-4">
+            <div className="w-full max-w-2xl rounded-xl bg-base-100 p-4 shadow-2xl">
+              <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
+                <div>
+                  <h3 className="text-lg font-semibold">{documentSaveConfirm.title}</h3>
+                  <p className="text-sm text-base-content/60">{documentSaveConfirm.description}</p>
+                </div>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() =>
+                    setDocumentSaveConfirm((prev) => ({
+                      ...prev,
+                      open: false,
+                    }))
+                  }
+                  disabled={mutatingDocument}
+                >
+                  关闭
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <div className="rounded-xl border border-base-300 bg-base-200 p-3">
+                  <div className="text-xs text-base-content/50">提交预览</div>
+                  <pre className="mt-2 max-h-[48vh] overflow-auto rounded-xl border border-base-300 bg-base-100 p-3 font-mono text-sm leading-6 whitespace-pre-wrap break-all">
+                    {documentSaveConfirm.previewText}
+                  </pre>
+                </div>
+                <div className="text-xs text-base-content/50">
+                  确认后才会真正提交。编辑模式下只会发送变更字段，未改动字段不会重复写入。
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-base-300 pt-3">
+                <button
+                  className="btn btn-outline btn-sm"
+                  onClick={() =>
+                    setDocumentSaveConfirm((prev) => ({
+                      ...prev,
+                      open: false,
+                    }))
+                  }
+                  disabled={mutatingDocument}
+                >
+                  返回编辑
+                </button>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => void confirmDocumentSave()}
+                  disabled={mutatingDocument}
+                >
+                  {mutatingDocument ? '提交中...' : '确认提交'}
                 </button>
               </div>
             </div>
