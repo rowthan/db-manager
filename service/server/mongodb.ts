@@ -446,11 +446,198 @@ function reviveExtendedJson(value: unknown): unknown {
   return value
 }
 
+function replaceMongoSingleQuotedStrings(source: string) {
+  let output = ''
+  let index = 0
+
+  while (index < source.length) {
+    const char = source[index]
+
+    if (char !== "'") {
+      output += char
+      index += 1
+      continue
+    }
+
+    let value = ''
+    index += 1
+    while (index < source.length) {
+      const inner = source[index]
+      if (inner === '\\') {
+        const next = source[index + 1]
+        if (next === undefined) {
+          value += inner
+          index += 1
+        } else if (next === "'" || next === '\\') {
+          value += next
+          index += 2
+        } else {
+          value += inner + next
+          index += 2
+        }
+        continue
+      }
+
+      if (inner === "'") {
+        index += 1
+        break
+      }
+
+      value += inner
+      index += 1
+    }
+
+    output += JSON.stringify(value)
+  }
+
+  return output
+}
+
+function quoteMongoShellKeys(source: string) {
+  let output = ''
+  let index = 0
+  let quote: '"' | null = null
+
+  while (index < source.length) {
+    const char = source[index]
+
+    if (quote) {
+      output += char
+      if (char === '\\') {
+        output += source[index + 1] || ''
+        index += 2
+        continue
+      }
+      if (char === quote) {
+        quote = null
+      }
+      index += 1
+      continue
+    }
+
+    if (char === '"') {
+      quote = char
+      output += char
+      index += 1
+      continue
+    }
+
+    if (char !== '{' && char !== ',') {
+      output += char
+      index += 1
+      continue
+    }
+
+    output += char
+    index += 1
+
+    const whitespaceStart = index
+    while (/\s/.test(source[index] || '')) {
+      index += 1
+    }
+    const whitespace = source.slice(whitespaceStart, index)
+    const keyStart = index
+
+    if (!/[$A-Za-z_]/.test(source[index] || '')) {
+      output += whitespace
+      continue
+    }
+
+    index += 1
+    while (/[$\w]/.test(source[index] || '')) {
+      index += 1
+    }
+
+    const key = source.slice(keyStart, index)
+    const afterKeyWhitespaceStart = index
+    while (/\s/.test(source[index] || '')) {
+      index += 1
+    }
+
+    if (source[index] === ':') {
+      output += `${whitespace}${JSON.stringify(key)}${source.slice(afterKeyWhitespaceStart, index)}:`
+      index += 1
+    } else {
+      output += whitespace + key + source.slice(afterKeyWhitespaceStart, index)
+    }
+  }
+
+  return output
+}
+
+function removeMongoTrailingCommas(source: string) {
+  let output = ''
+  let index = 0
+  let quote: '"' | null = null
+
+  while (index < source.length) {
+    const char = source[index]
+
+    if (quote) {
+      output += char
+      if (char === '\\') {
+        output += source[index + 1] || ''
+        index += 2
+        continue
+      }
+      if (char === quote) {
+        quote = null
+      }
+      index += 1
+      continue
+    }
+
+    if (char === '"') {
+      quote = char
+      output += char
+      index += 1
+      continue
+    }
+
+    if (char === ',') {
+      let lookahead = index + 1
+      while (/\s/.test(source[lookahead] || '')) {
+        lookahead += 1
+      }
+      if (source[lookahead] === '}' || source[lookahead] === ']') {
+        index += 1
+        continue
+      }
+    }
+
+    output += char
+    index += 1
+  }
+
+  return output
+}
+
+function normalizeMongoShellSyntax(text: string) {
+  return removeMongoTrailingCommas(
+    quoteMongoShellKeys(
+      replaceMongoSingleQuotedStrings(text)
+        .replace(/\bObjectId\s*\(\s*["']([0-9a-fA-F]{24})["']\s*\)/g, '{"$oid":"$1"}')
+        .replace(/\b(?:ISODate|Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}')
+    )
+  )
+}
+
+function parseMongoSyntax(text: string) {
+  const trimmed = text.trim()
+  if (!trimmed) return {}
+
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return JSON.parse(normalizeMongoShellSyntax(trimmed))
+  }
+}
+
 function normalizeInput(value: unknown) {
   if (typeof value === 'string') {
     const trimmed = value.trim()
     if (!trimmed) return {}
-    return reviveExtendedJson(JSON.parse(trimmed))
+    return reviveExtendedJson(parseMongoSyntax(trimmed))
   }
 
   return reviveExtendedJson(value ?? {})

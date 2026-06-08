@@ -292,6 +292,7 @@ export type ForeignLookupModalState = {
   open: boolean
   fieldKey: string
   fieldLabel: string
+  sourceDatabase: string
   value: unknown
   relations: ForeignLookupRelation[]
   items: ForeignLookupResultItem[]

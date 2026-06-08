@@ -9,6 +9,7 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  InfoCircledIcon,
   MixerHorizontalIcon,
   ReloadIcon,
 } from '@radix-ui/react-icons'
@@ -374,6 +375,193 @@ function parseJson(text: string) {
   return JSON.parse(trimmed)
 }
 
+function replaceMongoSingleQuotedStrings(source: string) {
+  let output = ''
+  let index = 0
+
+  while (index < source.length) {
+    const char = source[index]
+
+    if (char !== "'") {
+      output += char
+      index += 1
+      continue
+    }
+
+    let value = ''
+    index += 1
+    while (index < source.length) {
+      const inner = source[index]
+      if (inner === '\\') {
+        const next = source[index + 1]
+        if (next === undefined) {
+          value += inner
+          index += 1
+        } else if (next === "'" || next === '\\') {
+          value += next
+          index += 2
+        } else {
+          value += inner + next
+          index += 2
+        }
+        continue
+      }
+
+      if (inner === "'") {
+        index += 1
+        break
+      }
+
+      value += inner
+      index += 1
+    }
+
+    output += JSON.stringify(value)
+  }
+
+  return output
+}
+
+function quoteMongoShellKeys(source: string) {
+  let output = ''
+  let index = 0
+  let quote: '"' | null = null
+
+  while (index < source.length) {
+    const char = source[index]
+
+    if (quote) {
+      output += char
+      if (char === '\\') {
+        output += source[index + 1] || ''
+        index += 2
+        continue
+      }
+      if (char === quote) {
+        quote = null
+      }
+      index += 1
+      continue
+    }
+
+    if (char === '"') {
+      quote = char
+      output += char
+      index += 1
+      continue
+    }
+
+    if (char !== '{' && char !== ',') {
+      output += char
+      index += 1
+      continue
+    }
+
+    output += char
+    index += 1
+
+    const whitespaceStart = index
+    while (/\s/.test(source[index] || '')) {
+      index += 1
+    }
+    const whitespace = source.slice(whitespaceStart, index)
+    const keyStart = index
+
+    if (!/[$A-Za-z_]/.test(source[index] || '')) {
+      output += whitespace
+      continue
+    }
+
+    index += 1
+    while (/[$\w]/.test(source[index] || '')) {
+      index += 1
+    }
+
+    const key = source.slice(keyStart, index)
+    const afterKeyWhitespaceStart = index
+    while (/\s/.test(source[index] || '')) {
+      index += 1
+    }
+
+    if (source[index] === ':') {
+      output += `${whitespace}${JSON.stringify(key)}${source.slice(afterKeyWhitespaceStart, index)}:`
+      index += 1
+    } else {
+      output += whitespace + key + source.slice(afterKeyWhitespaceStart, index)
+    }
+  }
+
+  return output
+}
+
+function removeMongoTrailingCommas(source: string) {
+  let output = ''
+  let index = 0
+  let quote: '"' | null = null
+
+  while (index < source.length) {
+    const char = source[index]
+
+    if (quote) {
+      output += char
+      if (char === '\\') {
+        output += source[index + 1] || ''
+        index += 2
+        continue
+      }
+      if (char === quote) {
+        quote = null
+      }
+      index += 1
+      continue
+    }
+
+    if (char === '"') {
+      quote = char
+      output += char
+      index += 1
+      continue
+    }
+
+    if (char === ',') {
+      let lookahead = index + 1
+      while (/\s/.test(source[lookahead] || '')) {
+        lookahead += 1
+      }
+      if (source[lookahead] === '}' || source[lookahead] === ']') {
+        index += 1
+        continue
+      }
+    }
+
+    output += char
+    index += 1
+  }
+
+  return output
+}
+
+function normalizeMongoShellSyntax(text: string) {
+  return removeMongoTrailingCommas(
+    quoteMongoShellKeys(
+      replaceMongoSingleQuotedStrings(text)
+        .replace(/\bObjectId\s*\(\s*["']([0-9a-fA-F]{24})["']\s*\)/g, '{"$oid":"$1"}')
+        .replace(/\b(?:ISODate|Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}')
+    )
+  )
+}
+
+function parseMongoSyntax(text: string) {
+  const trimmed = text.trim()
+  if (!trimmed) return {}
+
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return JSON.parse(normalizeMongoShellSyntax(trimmed))
+  }
+}
+
 function createAggregationStageDraft(
   operator = '$match',
   bodyText = '{}',
@@ -395,9 +583,9 @@ function parseAggregationPipelineText(text: string) {
     return [] as Record<string, unknown>[]
   }
 
-  const parsed = JSON.parse(trimmed)
+  const parsed = parseMongoSyntax(trimmed)
   if (!Array.isArray(parsed)) {
-    throw new Error('Pipeline 需要以 JSON 数组作为根节点')
+    throw new Error('Pipeline 需要以数组作为根节点')
   }
 
   return parsed.map((item, index) => {
@@ -447,7 +635,7 @@ function buildAggregationPipelineTextFromDrafts(drafts: AggregationStageDraft[])
     }
 
     return {
-      [operator]: JSON.parse(bodyText),
+      [operator]: parseMongoSyntax(bodyText),
     }
   })
   .filter((item): item is Record<string, unknown> => Boolean(item))
@@ -926,6 +1114,15 @@ function buildFilterDraftsFromExpression(expression: unknown) {
   visit(expression)
 
   return output.length ? output : [createEmptyFilterConditionDraft()]
+}
+
+function isEmptyFilterExpression(expression: unknown) {
+  return (
+    Boolean(expression) &&
+    typeof expression === 'object' &&
+    !Array.isArray(expression) &&
+    Object.keys(expression as Record<string, unknown>).length === 0
+  )
 }
 
 function buildSortText(sortMap: Record<string, number>) {
@@ -3243,6 +3440,9 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const [aggregationEditorMode, setAggregationEditorMode] = useState<AggregationEditorMode>('stages')
   const [aggregationStages, setAggregationStages] = useState<AggregationStageDraft[]>([])
   const [selectedSavedAggregationName, setSelectedSavedAggregationName] = useState('')
+  const [saveAggregationPopoverOpen, setSaveAggregationPopoverOpen] = useState(false)
+  const [aggregationSaveName, setAggregationSaveName] = useState('')
+  const [saveAggregationAsFavorite, setSaveAggregationAsFavorite] = useState(false)
   const [aggregationStagePreviews, setAggregationStagePreviews] = useState<
     Record<
       string,
@@ -3258,6 +3458,10 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const [filterBuilderDrafts, setFilterBuilderDrafts] = useState<FilterConditionDraft[]>([
     createEmptyFilterConditionDraft(),
   ])
+  const [filterBuilderCanSync, setFilterBuilderCanSync] = useState(true)
+  const [filterTextEditorOpen, setFilterTextEditorOpen] = useState(false)
+  const [filterTextDraft, setFilterTextDraft] = useState('')
+  const [filterTextEditorError, setFilterTextEditorError] = useState('')
   const [filterFieldSuggestionsOpenId, setFilterFieldSuggestionsOpenId] = useState<string | null>(null)
   const [collectionConfig, setCollectionConfig] = useState<CollectionConfig | null>(null)
   const [fieldConfigOpen, setFieldConfigOpen] = useState(false)
@@ -3290,6 +3494,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     open: false,
     fieldKey: '',
     fieldLabel: '',
+    sourceDatabase: '',
     value: null,
     relations: [],
     items: [],
@@ -3366,6 +3571,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const aggregationRequestSeqRef = useRef(0)
   const latestAggregationRequestIdByTabRef = useRef<Record<string, number>>({})
   const latestCollectionConfigKeyRef = useRef('')
+  const foreignLookupModalRef = useRef<ForeignLookupModalState>(foreignLookupModal)
   const [form, setForm] = useState<QueryForm>({
     database: '',
     collection: '',
@@ -3396,6 +3602,53 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       : []
   const routeDatabase = searchParams?.get('database')?.trim() || ''
   const routeCollection = searchParams?.get('collection')?.trim() || ''
+  const routeFilterText = searchParams?.get('filter') || ''
+  const routeProjectionText = searchParams?.get('projection') || ''
+  const routeSortText = searchParams?.get('sort') || ''
+  const routeFindOneText = searchParams?.get('findOne') || ''
+  const routePageSizeText = searchParams?.get('pageSize') || ''
+  const routeHasQueryParams = Boolean(
+    routeFilterText || routeProjectionText || routeSortText || routeFindOneText || routePageSizeText
+  )
+  const routePageSize = Number.parseInt(routePageSizeText, 10)
+
+  function applyRouteQueryParams(nextForm: QueryForm): QueryForm {
+    if (!routeHasQueryParams) {
+      return nextForm
+    }
+
+    return {
+      ...nextForm,
+      filterText: routeFilterText || nextForm.filterText,
+      projectionText: routeProjectionText || nextForm.projectionText,
+      sortText: routeSortText || nextForm.sortText,
+      findOne:
+        routeFindOneText === 'true'
+          ? true
+          : routeFindOneText === 'false'
+            ? false
+            : nextForm.findOne,
+      pageSize: Number.isFinite(routePageSize) && routePageSize > 0 ? routePageSize : nextForm.pageSize,
+      page: 0,
+    }
+  }
+
+  function formMatchesRouteQueryParams(nextForm: QueryForm) {
+    if (!routeHasQueryParams) {
+      return true
+    }
+
+    return (
+      (!routeFilterText || nextForm.filterText === routeFilterText) &&
+      (!routeProjectionText || nextForm.projectionText === routeProjectionText) &&
+      (!routeSortText || nextForm.sortText === routeSortText) &&
+      (!routeFindOneText ||
+        nextForm.findOne ===
+          (routeFindOneText === 'true' ? true : routeFindOneText === 'false' ? false : nextForm.findOne)) &&
+      (!routePageSizeText ||
+        (Number.isFinite(routePageSize) && routePageSize > 0 && nextForm.pageSize === routePageSize))
+    )
+  }
 
   useEffect(() => {
     activeWorkspaceTabIdRef.current = activeWorkspaceTabId
@@ -3404,6 +3657,10 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   useEffect(() => {
     formRef.current = form
   }, [form])
+
+  useEffect(() => {
+    foreignLookupModalRef.current = foreignLookupModal
+  }, [foreignLookupModal])
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -3433,18 +3690,22 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       }
 
       if (database || collection) {
-        setForm((prev) => ({
-          ...prev,
-          database,
-          collection,
-          page: 0,
-        }))
+        setForm((prev) =>
+          applyRouteQueryParams({
+            ...prev,
+            database,
+            collection,
+            page: 0,
+          })
+        )
       } else if (restoredActiveWorkspaceTab) {
         setForm(
-          bindFormToWorkspaceTarget(
-            restoredActiveWorkspaceTab.form,
-            restoredActiveWorkspaceTab.database,
-            restoredActiveWorkspaceTab.collection
+          applyRouteQueryParams(
+            bindFormToWorkspaceTarget(
+              restoredActiveWorkspaceTab.form,
+              restoredActiveWorkspaceTab.database,
+              restoredActiveWorkspaceTab.collection
+            )
           )
         )
       }
@@ -3486,7 +3747,9 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         existing.database,
         existing.collection
       )
-      if (activeWorkspaceTabId !== existing.id) {
+      const routeExistingForm = applyRouteQueryParams(boundExistingForm)
+      const shouldApplyRouteQuery = routeHasQueryParams && !formMatchesRouteQueryParams(boundExistingForm)
+      if (activeWorkspaceTabId !== existing.id || shouldApplyRouteQuery) {
         lastAutoQueryKeyRef.current = ''
         setResult(existing.result)
         setQueryError(existing.queryError)
@@ -3497,18 +3760,24 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         setAggregationEditorMode(existing.aggregation.editorMode)
         setAggregationStages(existing.aggregation.stages)
         setSelectedSavedAggregationName(existing.aggregation.selectedSavedAggregationName)
-        setForm(boundExistingForm)
+        setForm(routeExistingForm)
         setActiveWorkspaceTabId(existing.id)
+        if (shouldApplyRouteQuery) {
+          void executeQuery(routeExistingForm, existing.id)
+        }
       }
       return
     }
 
-    setForm((prev) => ({
-      ...prev,
-      database: nextDatabase,
-      collection: nextCollection,
-      page: 0,
-    }))
+    setForm((prev) =>
+      applyRouteQueryParams({
+        ...prev,
+        database: nextDatabase,
+        collection: nextCollection,
+        page: 0,
+      })
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeWorkspaceTabId,
     form.collection,
@@ -3516,6 +3785,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     hydratedSelection,
     routeCollection,
     routeDatabase,
+    routeFilterText,
+    routeFindOneText,
+    routePageSize,
+    routePageSizeText,
+    routeProjectionText,
+    routeSortText,
     workspaceTabs,
   ])
 
@@ -3759,19 +4034,27 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const aggregationStageDrafts = useMemo(() => aggregationStages, [aggregationStages])
   const aggregationPipelineParseError = useMemo(() => {
     try {
-      buildAggregationPipelineTextFromDrafts(aggregationStageDrafts)
+      if (aggregationEditorMode === 'text') {
+        parseAggregationPipelineText(aggregationPipelineText)
+      } else {
+        buildAggregationPipelineTextFromDrafts(aggregationStageDrafts)
+      }
       return ''
     } catch (error) {
       return error instanceof Error ? error.message : 'Pipeline 格式不正确'
     }
-  }, [aggregationStageDrafts])
+  }, [aggregationEditorMode, aggregationPipelineText, aggregationStageDrafts])
   const aggregationPipelineTextValue = useMemo(() => {
+    if (aggregationEditorMode === 'text') {
+      return aggregationPipelineText
+    }
+
     try {
       return buildAggregationPipelineTextFromDrafts(aggregationStageDrafts)
     } catch {
       return aggregationPipelineText
     }
-  }, [aggregationPipelineText, aggregationStageDrafts])
+  }, [aggregationEditorMode, aggregationPipelineText, aggregationStageDrafts])
   const foreignKeyRelationsByField = useMemo(() => {
     const output = new Map<string, ForeignLookupRelation[]>()
 
@@ -3905,7 +4188,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const exportPreviewText = useMemo(() => prettyJson(exportPreviewData), [exportPreviewData])
 
   useEffect(() => {
-    if (!filterBuilderOpen) {
+    if (!filterBuilderOpen || !filterBuilderCanSync) {
       return
     }
 
@@ -3918,7 +4201,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
             filterText: nextFilterText,
           }
     )
-  }, [filterBuilderDrafts, filterBuilderOpen])
+  }, [filterBuilderCanSync, filterBuilderDrafts, filterBuilderOpen])
 
   useEffect(() => {
     if (fieldConfigOpen) {
@@ -4075,8 +4358,19 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     fieldSettings?: FieldSetting[]
     savedQueries?: SavedQuery[]
     savedAggregations?: SavedAggregation[]
+    database?: string
+    collection?: string
   }) {
-    if (!form.database || !form.collection) {
+    const targetDatabase =
+      nextConfig.database?.trim() ||
+      activeWorkspaceTab?.database?.trim() ||
+      form.database.trim()
+    const targetCollection =
+      nextConfig.collection?.trim() ||
+      activeWorkspaceTab?.collection?.trim() ||
+      form.collection.trim()
+
+    if (!targetDatabase || !targetCollection) {
       setQueryError('请先选择数据库和集合')
       return null
     }
@@ -4089,8 +4383,8 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          database: form.database.trim(),
-          collection: form.collection.trim(),
+          database: targetDatabase,
+          collection: targetCollection,
           fieldSettings: nextConfig.fieldSettings ?? collectionConfig?.fieldSettings ?? [],
           savedQueries: nextConfig.savedQueries ?? collectionConfig?.savedQueries ?? [],
           savedAggregations: nextConfig.savedAggregations ?? collectionConfig?.savedAggregations ?? [],
@@ -4101,6 +4395,16 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         throw new Error(data.error || '保存配置失败')
       }
       setCollectionConfig(data)
+      setWorkspaceTabs((prev) =>
+        prev.map((tab) =>
+          tab.database === targetDatabase && tab.collection === targetCollection
+            ? {
+                ...tab,
+                collectionConfig: data,
+              }
+            : tab
+        )
+      )
       return data
     } finally {
       setSavingConfig(false)
@@ -4263,6 +4567,8 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
   async function executeAggregation(
     stageDrafts = aggregationStageDrafts,
+    pipelineTextInput = aggregationPipelineTextValue,
+    editorMode = aggregationEditorMode,
     targetTabId = activeWorkspaceTabIdRef.current
   ) {
     const database = activeWorkspaceTab?.database || form.database
@@ -4286,30 +4592,36 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     }
 
     try {
-      const pipelineText = buildAggregationPipelineTextFromDrafts(stageDrafts)
+      const pipelineText =
+        editorMode === 'text' ? pipelineTextInput : buildAggregationPipelineTextFromDrafts(stageDrafts)
       const parsedPipeline = parseAggregationPipelineText(pipelineText)
       const data = await requestAggregationPreview(database, collection, parsedPipeline, DEFAULT_AGGREGATION_LIMIT)
-      const enabledStages = stageDrafts.filter((stage) => stage.enabled)
-      const previewEntries = await Promise.all(
-        enabledStages.map(async (stage, index) => {
-          try {
-            const partialPipeline = parseAggregationPipelineText(
-              buildAggregationPipelineTextFromDrafts(enabledStages.slice(0, index + 1))
+      const syncedStageDrafts =
+        editorMode === 'text' ? buildAggregationStageDraftsFromPipelineText(pipelineText) : stageDrafts
+      const enabledStages = syncedStageDrafts.filter((stage) => stage.enabled)
+      const previewEntries =
+        editorMode === 'stages'
+          ? await Promise.all(
+              enabledStages.map(async (stage, index) => {
+                try {
+                  const partialPipeline = parseAggregationPipelineText(
+                    buildAggregationPipelineTextFromDrafts(enabledStages.slice(0, index + 1))
+                  )
+                  const preview = await requestAggregationPreview(database, collection, partialPipeline, 10)
+                  return [stage.id, { loading: false, error: '', result: preview }] as const
+                } catch (error) {
+                  return [
+                    stage.id,
+                    {
+                      loading: false,
+                      error: error instanceof Error ? error.message : '预览失败',
+                      result: null,
+                    },
+                  ] as const
+                }
+              })
             )
-            const preview = await requestAggregationPreview(database, collection, partialPipeline, 10)
-            return [stage.id, { loading: false, error: '', result: preview }] as const
-          } catch (error) {
-            return [
-              stage.id,
-              {
-                loading: false,
-                error: error instanceof Error ? error.message : '预览失败',
-                result: null,
-              },
-            ] as const
-          }
-        })
-      )
+          : []
       const nextAggregationError = ''
       const isLatestRequest =
         !targetTabId || latestAggregationRequestIdByTabRef.current[targetTabId] === requestId
@@ -4327,7 +4639,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                   aggregation: {
                     ...tab.aggregation,
                     pipelineText,
-                    stages: stageDrafts,
+                    stages: syncedStageDrafts,
                     result: data,
                     error: nextAggregationError,
                   },
@@ -4339,6 +4651,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
       if (!targetTabId || activeWorkspaceTabIdRef.current === targetTabId) {
         setAggregationPipelineText(pipelineText)
+        setAggregationStages(syncedStageDrafts)
         setAggregationResult(data)
         setAggregationError(nextAggregationError)
         setAggregationStagePreviews(
@@ -4364,7 +4677,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                   ...tab,
                   aggregation: {
                     ...tab.aggregation,
-                    pipelineText: aggregationPipelineText,
+                    pipelineText: pipelineTextInput,
                     stages: stageDrafts,
                     error: nextAggregationError,
                   },
@@ -5238,6 +5551,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       closeDeleteDocument()
       setResultSelectionResetVersion((version) => version + 1)
       await executeQuery()
+      await refreshForeignLookupModal()
       if (failed.length) {
         throw new Error(`批量删除完成，但有 ${failed.length} 条失败：${failed[0]?.reason instanceof Error ? failed[0].reason.message : '删除失败'}`)
       }
@@ -5319,34 +5633,49 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     })
   }
 
-  async function saveAggregationPreset(saveAsFavorite = false) {
-    const name =
-      window.prompt('输入要保存的 pipeline 名称', selectedSavedAggregationName || '')?.trim() || ''
-    if (!name) {
-      return
-    }
+  function openAggregationSavePopover(saveAsFavorite = false) {
+    setAggregationSaveName(selectedSavedAggregationName || '')
+    setSaveAggregationAsFavorite(saveAsFavorite)
+    setAggregationError('')
+    setSaveAggregationPopoverOpen(true)
+  }
 
-    const savedAggregations = [...(collectionConfig?.savedAggregations || [])]
-    const existingPreset = savedAggregations.find((item) => item.name === name)
-    const nextPreset: SavedAggregation = {
-      name,
-      pipelineText: aggregationPipelineTextValue,
-      favorite: saveAsFavorite || existingPreset?.favorite === true,
-    }
-    const index = savedAggregations.findIndex((item) => item.name === name)
-    if (index >= 0) {
-      savedAggregations[index] = nextPreset
-    } else {
-      savedAggregations.unshift(nextPreset)
-    }
+  async function saveAggregationPreset() {
+    try {
+      const pipelineText = prettyJson(parseAggregationPipelineText(aggregationPipelineTextValue))
+      const name = aggregationSaveName.trim()
+      if (!name) {
+        setAggregationError('请输入 pipeline 名称')
+        return
+      }
 
-    const data = await persistCollectionConfig({
-      fieldSettings: collectionConfig?.fieldSettings || [],
-      savedQueries: collectionConfig?.savedQueries || [],
-      savedAggregations,
-    })
-    if (data) {
-      setSelectedSavedAggregationName(name)
+      const savedAggregations = [...(collectionConfig?.savedAggregations || [])]
+      const existingPreset = savedAggregations.find((item) => item.name === name)
+      const nextPreset: SavedAggregation = {
+        name,
+        pipelineText,
+        favorite: saveAggregationAsFavorite || existingPreset?.favorite === true,
+      }
+      const index = savedAggregations.findIndex((item) => item.name === name)
+      if (index >= 0) {
+        savedAggregations[index] = nextPreset
+      } else {
+        savedAggregations.unshift(nextPreset)
+      }
+
+      const data = await persistCollectionConfig({
+        fieldSettings: collectionConfig?.fieldSettings || [],
+        savedQueries: collectionConfig?.savedQueries || [],
+        savedAggregations,
+      })
+      if (data) {
+        setAggregationPipelineText(pipelineText)
+        setSelectedSavedAggregationName(name)
+        setSaveAggregationPopoverOpen(false)
+        setAggregationError('')
+      }
+    } catch (error) {
+      setAggregationError(error instanceof Error ? error.message : '保存 pipeline 失败')
     }
   }
 
@@ -5364,22 +5693,27 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   }
 
   async function toggleSavedAggregationFavorite(name: string) {
-    const savedAggregations = [...(collectionConfig?.savedAggregations || [])]
-    const index = savedAggregations.findIndex((item) => item.name === name)
-    if (index < 0) {
-      return
-    }
+    try {
+      const savedAggregations = [...(collectionConfig?.savedAggregations || [])]
+      const index = savedAggregations.findIndex((item) => item.name === name)
+      if (index < 0) {
+        return
+      }
 
-    savedAggregations[index] = {
-      ...savedAggregations[index],
-      favorite: !savedAggregations[index]?.favorite,
-    }
+      savedAggregations[index] = {
+        ...savedAggregations[index],
+        favorite: !savedAggregations[index]?.favorite,
+      }
 
-    await persistCollectionConfig({
-      fieldSettings: collectionConfig?.fieldSettings || [],
-      savedQueries: collectionConfig?.savedQueries || [],
-      savedAggregations,
-    })
+      await persistCollectionConfig({
+        fieldSettings: collectionConfig?.fieldSettings || [],
+        savedQueries: collectionConfig?.savedQueries || [],
+        savedAggregations,
+      })
+      setAggregationError('')
+    } catch (error) {
+      setAggregationError(error instanceof Error ? error.message : '保存收藏状态失败')
+    }
   }
 
   function applyPreset(preset: SavedQuery) {
@@ -5391,7 +5725,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     }
     setForm(nextForm)
     if (filterBuilderOpen) {
-      hydrateFilterBuilderFromText(nextFilterText)
+      setFilterBuilderCanSync(hydrateFilterBuilderFromText(nextFilterText))
     }
     void executeQuery(nextForm)
   }
@@ -5411,7 +5745,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     }
     setForm(nextForm)
     if (filterBuilderOpen) {
-      hydrateFilterBuilderFromText(nextFilterText)
+      setFilterBuilderCanSync(hydrateFilterBuilderFromText(nextFilterText))
     }
     void executeQuery(nextForm)
   }
@@ -5419,17 +5753,43 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   function hydrateFilterBuilderFromText(filterText: string) {
     try {
       const parsed = parseJson(filterText)
-      setFilterBuilderDrafts(buildFilterDraftsFromExpression(parsed))
+      const drafts = buildFilterDraftsFromExpression(parsed)
+      const canSync = isEmptyFilterExpression(parsed) || drafts.some((draft) => draft.field.trim())
+      setFilterBuilderDrafts(drafts)
+      return canSync
     } catch {
       setFilterBuilderDrafts([createEmptyFilterConditionDraft()])
+      return false
     }
   }
 
   function setFilterBuilderVisibility(nextOpen: boolean) {
     if (nextOpen) {
-      hydrateFilterBuilderFromText(form.filterText)
+      setFilterBuilderCanSync(hydrateFilterBuilderFromText(form.filterText))
     }
     setFilterBuilderOpen(nextOpen)
+  }
+
+  function openFilterTextEditor() {
+    setFilterTextDraft(form.filterText || DEFAULT_FILTER)
+    setFilterTextEditorError('')
+    setFilterTextEditorOpen(true)
+  }
+
+  function applyFilterTextEditor() {
+    try {
+      const nextFilterText = prettyJson(parseJson(filterTextDraft))
+      setForm((prev) => ({
+        ...prev,
+        filterText: nextFilterText,
+        page: 0,
+      }))
+      setFilterBuilderCanSync(hydrateFilterBuilderFromText(nextFilterText))
+      setFilterTextEditorOpen(false)
+      setFilterTextEditorError('')
+    } catch (error) {
+      setFilterTextEditorError(error instanceof Error ? error.message : 'JSON 格式不正确')
+    }
   }
 
   function addFilterCondition() {
@@ -5445,6 +5805,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   }
 
   function updateFilterCondition(id: string, patch: Partial<FilterConditionDraft>) {
+    setFilterBuilderCanSync(true)
     setFilterBuilderDrafts((prev) =>
       prev.map((item) =>
         item.id === id
@@ -5464,6 +5825,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
   function clearFilterBuilder() {
     const nextDrafts = [createEmptyFilterConditionDraft()]
+    setFilterBuilderCanSync(true)
     setFilterBuilderDrafts(nextDrafts)
     setFilterFieldSuggestionsOpenId(null)
     setForm((prev) => ({
@@ -5534,6 +5896,11 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     const params = new URLSearchParams(searchParams?.toString() || '')
     params.set('database', database)
     params.set('collection', collection)
+    params.delete('filter')
+    params.delete('projection')
+    params.delete('sort')
+    params.delete('findOne')
+    params.delete('pageSize')
     router.replace(`/db?${params.toString()}`, { scroll: false })
   }
 
@@ -5738,13 +6105,36 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     }
   }
 
+  function switchAggregationEditorMode(nextMode: AggregationEditorMode) {
+    if (nextMode === aggregationEditorMode) {
+      return
+    }
+
+    if (nextMode === 'text') {
+      setAggregationPipelineText(aggregationPipelineTextValue)
+      setAggregationEditorMode(nextMode)
+      return
+    }
+
+    try {
+      setAggregationStages(buildAggregationStageDraftsFromPipelineText(aggregationPipelineText))
+      setAggregationError('')
+    } catch (error) {
+      setAggregationError(error instanceof Error ? error.message : 'Pipeline 格式不正确')
+      return
+    }
+    setAggregationEditorMode(nextMode)
+    setAggregationStagePreviews({})
+  }
+
   function resetConditions() {
     if (filterBuilderOpen) {
+      setFilterBuilderCanSync(true)
       setFilterBuilderDrafts([createEmptyFilterConditionDraft()])
     }
     setForm((prev) => buildResetQueryForm(prev))
     if (filterBuilderOpen) {
-      hydrateFilterBuilderFromText(DEFAULT_FILTER)
+      setFilterBuilderCanSync(hydrateFilterBuilderFromText(DEFAULT_FILTER))
     }
   }
 
@@ -6007,6 +6397,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       open: true,
       fieldKey,
       fieldLabel,
+      sourceDatabase,
       value,
       relations,
       items,
@@ -6081,11 +6472,103 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     )
   }
 
+  async function refreshForeignLookupModal(modal = foreignLookupModalRef.current) {
+    if (!modal.open || !modal.relations.length) {
+      return
+    }
+
+    const sourceDatabase = modal.sourceDatabase || formRef.current?.database || form.database
+    const items: ForeignLookupResultItem[] = modal.relations.map((relation) => ({
+      relation,
+      loading: true,
+      error: '',
+      result: null,
+    }))
+
+    setForeignLookupModal((prev) =>
+      prev.open && prev.fieldKey === modal.fieldKey
+        ? {
+            ...prev,
+            items,
+          }
+        : prev
+    )
+
+    modal.relations.forEach((relation) => {
+      void ensureForeignCollectionConfig(
+        relation.targetDatabase || sourceDatabase,
+        relation.targetCollection
+      )
+    })
+
+    await Promise.all(
+      modal.relations.map(async (relation, index) => {
+        const nextDatabase = relation.targetDatabase || sourceDatabase
+        try {
+          const response = await fetch('/api/db/query', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              database: nextDatabase,
+              collection: relation.targetCollection,
+              filter: buildForeignLookupFilter(relation, modal.value),
+              projection: {},
+              sort: {},
+              page: 0,
+              pageSize: 20,
+              findOne: false,
+            }),
+          })
+
+          const data = (await response.json()) as MongoQueryResult & { error?: string }
+          setForeignLookupModal((prev) => {
+            if (!prev.open || prev.fieldKey !== modal.fieldKey) {
+              return prev
+            }
+
+            const nextItems = [...prev.items]
+            nextItems[index] = {
+              relation,
+              loading: false,
+              error: response.ok && data.ok ? '' : data.error || '查询失败',
+              result: response.ok && data.ok ? data : null,
+            }
+            return {
+              ...prev,
+              items: nextItems,
+            }
+          })
+        } catch (error) {
+          setForeignLookupModal((prev) => {
+            if (!prev.open || prev.fieldKey !== modal.fieldKey) {
+              return prev
+            }
+
+            const nextItems = [...prev.items]
+            nextItems[index] = {
+              relation,
+              loading: false,
+              error: error instanceof Error ? error.message : '查询失败',
+              result: null,
+            }
+            return {
+              ...prev,
+              items: nextItems,
+            }
+          })
+        }
+      })
+    )
+  }
+
   function closeForeignLookupModal() {
     setForeignLookupModal({
       open: false,
       fieldKey: '',
       fieldLabel: '',
+      sourceDatabase: '',
       value: null,
       relations: [],
       items: [],
@@ -6353,7 +6836,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                         <ChevronDownIcon className="h-4 w-4" />
                       </button>
                     </PopoverTrigger>
-                    <PopoverContent align="end" sideOffset={10} className="w-[min(760px,calc(100vw-2rem))] p-0">
+                    <PopoverContent
+                      align="end"
+                      sideOffset={10}
+                      collisionPadding={16}
+                      className="max-h-[var(--radix-popover-content-available-height)] w-[min(760px,calc(100vw-2rem))] overflow-y-auto overscroll-contain p-0"
+                    >
                       <div className="rounded-xl bg-base-100">
                         <div className="border-b border-base-300 px-4 py-3">
                           <div className="text-sm font-semibold">查询辅助</div>
@@ -6362,19 +6850,19 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                           </div>
                         </div>
 
-                        <div className="space-y-3 p-4">
-                          <div className="space-y-2">
+                        <div className="space-y-3 p-3">
+                          <div className="space-y-1.5">
                             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
                               历史查询
                             </div>
                             {savedQueries.length ? (
-                              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                              <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
                                 {savedQueries.map((preset, index) => (
                                   <div
                                     key={preset.name}
                                     role="button"
                                     tabIndex={0}
-                                    className="w-full rounded-xl border border-base-300 bg-base-100 px-3 py-2.5 text-left transition hover:border-primary/40 hover:bg-base-200/40"
+                                    className="w-full rounded-lg border border-base-300 bg-base-100 px-2.5 py-1.5 text-left transition hover:border-primary/40 hover:bg-base-200/40"
                                     onClick={() => {
                                       applyPreset(preset)
                                       setFilterBuilderVisibility(false)
@@ -6387,11 +6875,11 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                                       }
                                     }}
                                   >
-                                    <div className="flex items-center justify-between gap-3">
+                                    <div className="flex items-center justify-between gap-2">
                                       <div className="flex min-w-0 items-center gap-2">
                                         <button
                                           type="button"
-                                          className={`text-sm ${preset.favorite ? 'text-warning' : 'text-base-content/30 hover:text-warning'}`}
+                                          className={`text-xs leading-none ${preset.favorite ? 'text-warning' : 'text-base-content/30 hover:text-warning'}`}
                                           aria-label={preset.favorite ? '取消收藏' : '收藏查询'}
                                           title={preset.favorite ? '取消收藏' : '收藏查询'}
                                           onClick={(e) => {
@@ -6402,13 +6890,13 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                                         >
                                           {preset.favorite ? '★' : '☆'}
                                         </button>
-                                        <div className="truncate text-sm font-semibold">{preset.name}</div>
+                                        <div className="truncate text-xs font-semibold">{preset.name}</div>
                                       </div>
                                       <div className="shrink-0 text-[11px] text-base-content/45">
                                         {index === 0 ? '最近保存' : `历史 ${index + 1}`}
                                       </div>
                                     </div>
-                                    <div className="mt-1 truncate font-mono text-[11px] text-base-content/55">
+                                    <div className="mt-0.5 truncate font-mono text-[10px] leading-4 text-base-content/50">
                                       {preset.filterText || DEFAULT_FILTER}
                                     </div>
                                   </div>
@@ -6423,22 +6911,63 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
                           <div className="h-px bg-base-300" />
 
-                          <div className="flex flex-wrap gap-2">
-                            {commonQueryPresets.map((preset) => (
-                              <button
-                                key={preset.label}
-                                className="btn btn-outline btn-xs"
-                                onClick={() => {
-                                  applyCommonPreset(preset.filterText)
-                                  setFilterBuilderVisibility(false)
-                                }}
-                                title={preset.description}
-                                type="button"
-                              >
-                                {preset.label}
-                              </button>
-                            ))}
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap gap-2">
+                              {commonQueryPresets.map((preset) => (
+                                <button
+                                  key={preset.label}
+                                  className="btn btn-outline btn-xs"
+                                  onClick={() => {
+                                    applyCommonPreset(preset.filterText)
+                                    setFilterBuilderVisibility(false)
+                                  }}
+                                  title={preset.description}
+                                  type="button"
+                                >
+                                  {preset.label}
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              className={`btn btn-xs ${filterTextEditorOpen ? 'btn-primary' : 'btn-ghost'}`}
+                              onClick={openFilterTextEditor}
+                              type="button"
+                            >
+                              编辑条件
+                            </button>
                           </div>
+
+                          {filterTextEditorOpen ? (
+                            <div className="rounded-xl border border-base-300 bg-base-200/30 p-2.5">
+                              <textarea
+                                className="textarea textarea-bordered compass-input min-h-[112px] w-full font-mono text-xs leading-5"
+                                value={filterTextDraft}
+                                onChange={(e) => {
+                                  setFilterTextDraft(e.target.value)
+                                  setFilterTextEditorError('')
+                                }}
+                                spellCheck={false}
+                              />
+                              {filterTextEditorError ? (
+                                <div className="mt-1 text-xs text-error">{filterTextEditorError}</div>
+                              ) : null}
+                              <div className="mt-2 flex justify-end gap-2">
+                                <button
+                                  className="btn btn-ghost btn-xs"
+                                  onClick={() => {
+                                    setFilterTextEditorOpen(false)
+                                    setFilterTextEditorError('')
+                                  }}
+                                  type="button"
+                                >
+                                  取消
+                                </button>
+                                <button className="btn btn-primary btn-xs" onClick={applyFilterTextEditor} type="button">
+                                  应用条件
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
 
                           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
                             过滤构造器
@@ -6458,7 +6987,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                             </div>
                           </div>
 
-                          <div className="max-h-[56vh] space-y-2 overflow-auto pr-1">
+                          <div className="space-y-2 pr-1 md:max-h-[56vh] md:overflow-auto">
                             {filterBuilderDrafts.map((rule) => (
                               <div
                                 key={rule.id}
@@ -7103,13 +7632,67 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                       : '☆'}
                   </button>
                 ) : null}
-                <button type="button" className="btn btn-outline btn-sm" onClick={() => void saveAggregationPreset()}>
-                  Save
-                </button>
+                <Popover
+                  open={saveAggregationPopoverOpen}
+                  onOpenChange={(open) => {
+                    if (open) {
+                      setAggregationSaveName(selectedSavedAggregationName || '')
+                      setSaveAggregationAsFavorite(false)
+                      setAggregationError('')
+                    }
+                    setSaveAggregationPopoverOpen(open)
+                    if (!open) {
+                      setSaveAggregationAsFavorite(false)
+                    }
+                  }}
+                >
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                    >
+                      Save
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" sideOffset={10} className="w-80 p-0">
+                    <div className="rounded-xl bg-base-100 p-4">
+                      <div className="text-sm font-semibold">保存 pipeline</div>
+                      <div className="mt-1 text-xs text-base-content/50">
+                        保存当前 aggregation pipeline，之后可从下拉列表快速复用。
+                      </div>
+                      <input
+                        className="input input-bordered input-sm compass-input mt-3 w-full"
+                        value={aggregationSaveName}
+                        onChange={(e) => setAggregationSaveName(e.target.value)}
+                        placeholder="例如：订单金额汇总"
+                      />
+                      <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="checkbox checkbox-sm"
+                          checked={saveAggregationAsFavorite}
+                          onChange={(e) => setSaveAggregationAsFavorite(e.target.checked)}
+                        />
+                        <span>同时加入收藏</span>
+                      </label>
+                      <div className="mt-3 flex items-center justify-between gap-2">
+                        <div className="text-xs text-base-content/50">已保存 {savedAggregations.length} 条</div>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          onClick={() => void saveAggregationPreset()}
+                          disabled={!aggregationSaveName.trim() || savingConfig}
+                        >
+                          {savingConfig ? '保存中...' : '保存'}
+                        </button>
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
                 <button
                   type="button"
                   className="btn btn-outline btn-sm"
-                  onClick={() => void saveAggregationPreset(true)}
+                  onClick={() => openAggregationSavePopover(true)}
                 >
                   Favorite
                 </button>
@@ -7117,14 +7700,14 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                   <button
                     type="button"
                     className={`btn btn-sm join-item ${aggregationEditorMode === 'stages' ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => setAggregationEditorMode('stages')}
+                    onClick={() => switchAggregationEditorMode('stages')}
                   >
                     Stages
                   </button>
                   <button
                     type="button"
                     className={`btn btn-sm join-item ${aggregationEditorMode === 'text' ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => setAggregationEditorMode('text')}
+                    onClick={() => switchAggregationEditorMode('text')}
                   >
                     Text
                   </button>
@@ -7269,37 +7852,10 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                         <div className="grid min-h-[320px] divide-y divide-base-300 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:divide-x lg:divide-y-0">
                           <div className="p-4">
                             <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
-                              语法说明
-                            </div>
-                            <div className="rounded-2xl border border-base-300 bg-base-50 p-4">
-                              <div className="text-sm font-semibold text-base-content/85">{stageGuide.title}</div>
-                              <div className="mt-2 text-sm leading-6 text-base-content/65">{stageGuide.summary}</div>
-                              <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
-                                Syntax
-                              </div>
-                              <div className="mt-2 rounded-xl bg-base-100 px-3 py-2 font-mono text-xs text-base-content/80">
-                                {stageGuide.syntax}
-                              </div>
-                              <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
-                                Tips
-                              </div>
-                              <div className="mt-2 space-y-1 text-sm text-base-content/65">
-                                {stageGuide.tips.map((tip) => (
-                                  <div key={tip}>- {tip}</div>
-                                ))}
-                              </div>
-                              <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
-                                Demo
-                              </div>
-                              <pre className="mt-2 overflow-x-auto rounded-xl bg-base-100 p-3 text-xs leading-6 text-base-content/80">
-                                <code>{stageGuide.demo}</code>
-                              </pre>
-                            </div>
-                            <div className="mb-3 mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
                               条件编辑
                             </div>
                             <textarea
-                              className="min-h-[240px] w-full rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] px-3 py-3 font-mono text-sm outline-none focus:border-primary"
+                              className="min-h-[360px] w-full rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] px-3 py-3 font-mono text-sm outline-none focus:border-primary"
                               value={stage.bodyText}
                               onChange={(e) =>
                                 updateAggregationStage(stage.id, (current) => ({
@@ -7312,29 +7868,66 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                           </div>
 
                           <div className="p-0">
-                            <div className="flex items-center justify-between gap-2 px-4 py-4">
-                              <div className="text-sm font-medium text-base-content/80">
-                                Output preview after <span className="font-mono text-primary">{stage.operator}</span> stage
+                            <div>
+                              <div className="flex items-center justify-between gap-2 px-4 py-4">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <div className="text-sm font-medium text-base-content/80">
+                                    Output preview after <span className="font-mono text-primary">{stage.operator}</span> stage
+                                  </div>
+                                  <div className="group relative inline-flex">
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost btn-xs h-7 min-h-7 w-7 rounded-full p-0 text-base-content/55 hover:text-primary focus:text-primary"
+                                      aria-label={`${stageGuide.title} 语法说明`}
+                                    >
+                                      <InfoCircledIcon className="h-4 w-4" />
+                                    </button>
+                                    <div className="invisible absolute left-0 top-full z-30 mt-2 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-base-300 bg-base-100 p-4 text-left opacity-0 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+                                      <div className="text-sm font-semibold text-base-content/85">{stageGuide.title}</div>
+                                      <div className="mt-2 text-sm leading-6 text-base-content/65">{stageGuide.summary}</div>
+                                      <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                                        Syntax
+                                      </div>
+                                      <div className="mt-2 rounded-xl bg-base-50 px-3 py-2 font-mono text-xs text-base-content/80">
+                                        {stageGuide.syntax}
+                                      </div>
+                                      <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                                        Tips
+                                      </div>
+                                      <div className="mt-2 space-y-1 text-sm text-base-content/65">
+                                        {stageGuide.tips.map((tip) => (
+                                          <div key={tip}>- {tip}</div>
+                                        ))}
+                                      </div>
+                                      <div className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                                        Demo
+                                      </div>
+                                      <pre className="mt-2 overflow-x-auto rounded-xl bg-base-50 p-3 text-xs leading-6 text-base-content/80">
+                                        <code>{stageGuide.demo}</code>
+                                      </pre>
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <div className="text-xs text-base-content/45">Sample of 10 documents</div>
+                                  <button
+                                    type="button"
+                                    className="btn btn-outline btn-xs"
+                                    onClick={() => void executeAggregation()}
+                                    disabled={loadingAggregation || Boolean(aggregationPipelineParseError)}
+                                  >
+                                    {loadingAggregation ? '运行中...' : 'Run'}
+                                  </button>
+                                </div>
                               </div>
-                              <div className="flex items-center gap-3">
-                                <div className="text-xs text-base-content/45">Sample of 10 documents</div>
-                                <button
-                                  type="button"
-                                  className="btn btn-outline btn-xs"
-                                  onClick={() => void executeAggregation()}
-                                  disabled={loadingAggregation || Boolean(aggregationPipelineParseError)}
-                                >
-                                  {loadingAggregation ? '运行中...' : 'Run'}
-                                </button>
-                              </div>
+                              {renderPreviewCards(previewState?.result || null, previewState?.loading === true)}
+                              {previewState?.error ? (
+                                <div className="px-4 pb-4 text-sm text-error">{previewState.error}</div>
+                              ) : null}
+                              {!previewState && !loadingAggregation ? (
+                                <div className="px-4 pb-6 text-sm text-base-content/45">可以直接点击这里的 Run 生成局部预览。</div>
+                              ) : null}
                             </div>
-                            {renderPreviewCards(previewState?.result || null, previewState?.loading === true)}
-                            {previewState?.error ? (
-                              <div className="px-4 pb-4 text-sm text-error">{previewState.error}</div>
-                            ) : null}
-                            {!previewState && !loadingAggregation ? (
-                              <div className="px-4 pb-6 text-sm text-base-content/45">可以直接点击这里的 Run 生成局部预览。</div>
-                            ) : null}
                           </div>
                         </div>
                       ) : null}
@@ -7469,7 +8062,12 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                       +
                     </button>
                   </PopoverTrigger>
-                  <PopoverContent align="start" sideOffset={8} className="w-[300px] rounded-xl p-0">
+                  <PopoverContent
+                    align="start"
+                    sideOffset={8}
+                    className="w-[300px] rounded-xl p-0"
+                    onOpenAutoFocus={(event) => event.preventDefault()}
+                  >
                     <div className="border-b border-base-300 px-4 py-3">
                       <div className="text-sm font-semibold">打开新的集合标签</div>
                       <div className="mt-1 text-xs text-base-content/55">

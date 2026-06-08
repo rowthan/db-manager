@@ -2,6 +2,7 @@
 
 import type { Dispatch, SetStateAction } from 'react'
 import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import type { MongoMeta } from './db-page/types'
 
 const DEFAULT_SLOT_COUNT = 8
@@ -124,6 +125,7 @@ const EMPTY_FORM: WidgetFormState = {
 }
 
 export default function DashboardPageClient() {
+  const router = useRouter()
   const [dashboards, setDashboards] = useState<DashboardConfig[]>([])
   const [activeDashboardId, setActiveDashboardId] = useState('main')
   const [loadingConfig, setLoadingConfig] = useState(true)
@@ -623,6 +625,18 @@ export default function DashboardPageClient() {
     }
   }
 
+  function openWidgetQuery(widget: DashboardWidgetConfig) {
+    const params = new URLSearchParams()
+    if (widget.database) {
+      params.set('database', widget.database)
+    }
+    params.set('collection', widget.collection)
+    params.set('filter', widget.filterText || '{}')
+    params.set('projection', widget.projectionText || '{}')
+    params.set('sort', widget.sortText || '{"createAt":-1}')
+    router.push(`/db?${params.toString()}`)
+  }
+
   if (loadingConfig) {
     return (
       <div className="h-full overflow-auto bg-[hsl(var(--app-shell-bg))] px-4 py-6 lg:px-8">
@@ -637,92 +651,109 @@ export default function DashboardPageClient() {
 
   return (
     <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top_left,rgba(22,163,74,0.12),transparent_28%),linear-gradient(180deg,hsl(var(--app-shell-bg)),hsl(var(--app-shell-bg)))] px-4 py-6 lg:px-8">
-      <div className="mx-auto max-w-7xl space-y-5">
-        <section className="overflow-hidden rounded-[2rem] border border-base-300 bg-base-100 shadow-sm">
-          <div className="border-b border-base-300 bg-[linear-gradient(135deg,rgba(22,163,74,0.16),transparent_55%)] px-6 py-6">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div className="min-w-0 flex-1">
-                {editMode ? (
-                  <div className="space-y-3">
-                    <input
-                      className="input input-bordered compass-input w-full max-w-xl text-xl font-semibold"
-                      value={activeConfig?.title || ''}
-                      onChange={(event) => void updateBoardMeta('title', event.target.value)}
-                      placeholder="Dashboard 标题"
-                    />
-                    <textarea
-                      className="textarea textarea-bordered compass-input min-h-[96px] w-full max-w-3xl"
-                      value={activeConfig?.description || ''}
-                      onChange={(event) => void updateBoardMeta('description', event.target.value)}
-                      placeholder="简单说明这块看板的用途"
-                    />
-                  </div>
-                ) : (
-                  <>
-                    <h1 className="text-3xl font-semibold tracking-tight">{activeConfig?.title || '数据看板'}</h1>
-                    <p className="mt-2 max-w-3xl text-sm text-base-content/65">
-                      {activeConfig?.description || '把常用统计和关键字段固定在一个面板里，方便持续查看。'}
-                    </p>
-                  </>
-                )}
-              </div>
+      <div className="mx-auto grid max-w-7xl gap-5 md:grid-cols-[240px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="h-fit rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-4 shadow-sm md:sticky md:top-6">
+          <div className="border-b border-base-300 pb-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">Dashboard</div>
+            <div className="mt-1 text-lg font-semibold">看板菜单</div>
+          </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <button type="button" className="btn btn-outline btn-sm" onClick={openCreateDashboard} disabled={saving}>
-                  新增看板
+          <div className="mt-4 space-y-2">
+            <div className="px-1 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">操作</div>
+            <button type="button" className="btn btn-outline btn-sm w-full justify-start" onClick={openCreateDashboard} disabled={saving}>
+              新增看板
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm w-full justify-start"
+              onClick={() => void refreshDashboardValues(slots)}
+              disabled={saving}
+            >
+              刷新数据
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm w-full justify-start ${editMode ? 'btn-primary' : 'btn-outline'}`}
+              onClick={() => setEditMode((prev) => !prev)}
+            >
+              {editMode ? '退出编辑' : '编辑模式'}
+            </button>
+            {editMode ? (
+              <div className="space-y-2 rounded-lg border border-base-300 bg-base-200/35 p-2">
+                <button type="button" className="btn btn-outline btn-sm w-full justify-start" onClick={() => void appendSlot()} disabled={saving}>
+                  新增格子
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  onClick={() => void refreshDashboardValues(slots)}
-                  disabled={saving}
-                >
-                  刷新数据
+                <button type="button" className="btn btn-primary btn-sm w-full justify-start" onClick={() => void saveBoardMeta()} disabled={saving}>
+                  {saving ? '保存中...' : '保存看板'}
                 </button>
-                {editMode ? (
-                  <>
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => void appendSlot()} disabled={saving}>
-                      新增格子
-                    </button>
-                    <button type="button" className="btn btn-outline btn-sm text-error" onClick={() => void deleteCurrentDashboard()} disabled={saving || dashboards.length <= 1}>
-                      删除看板
-                    </button>
-                    <button type="button" className="btn btn-primary btn-sm" onClick={() => void saveBoardMeta()} disabled={saving}>
-                      {saving ? '保存中...' : '保存看板'}
-                    </button>
-                  </>
-                ) : null}
-                <button
-                  type="button"
-                  className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-outline'}`}
-                  onClick={() => setEditMode((prev) => !prev)}
-                >
-                  {editMode ? '退出编辑' : '编辑模式'}
+                <button type="button" className="btn btn-outline btn-sm w-full justify-start text-error" onClick={() => void deleteCurrentDashboard()} disabled={saving || dashboards.length <= 1}>
+                  删除看板
                 </button>
-              </div>
-            </div>
-
-            {pageError ? (
-              <div className="mt-4 rounded-2xl border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
-                {pageError}
               </div>
             ) : null}
+          </div>
 
-            <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-5 space-y-2">
+            <div className="flex items-center justify-between px-1">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">看板列表</div>
+              <span className="rounded-full bg-base-200 px-2 py-0.5 text-[11px] text-base-content/55">{dashboards.length}</span>
+            </div>
+            <div className="space-y-1">
               {dashboards.map((dashboard) => {
                 const active = dashboard.id === activeConfig?.id
                 return (
                   <button
                     key={dashboard.id}
                     type="button"
-                    className={`rounded-full border px-4 py-2 text-sm transition ${active ? 'border-primary bg-primary text-primary-foreground' : 'border-base-300 bg-base-100 text-base-content/70 hover:border-primary hover:text-primary'}`}
+                    className={`flex w-full flex-col rounded-lg border px-3 py-2 text-left transition ${
+                      active
+                        ? 'border-success/30 bg-success/10 text-success'
+                        : 'border-transparent text-base-content/70 hover:border-base-300 hover:bg-base-200/60'
+                    }`}
                     onClick={() => setActiveDashboardId(dashboard.id)}
                   >
-                    {dashboard.title}
+                    <span className="truncate text-sm font-semibold">{dashboard.title}</span>
+                    <span className="mt-0.5 truncate text-xs text-base-content/45">
+                      {dashboard.slots.filter(Boolean).length} 个指标
+                    </span>
                   </button>
                 )
               })}
             </div>
+          </div>
+        </aside>
+
+        <section className="overflow-hidden rounded-[2rem] border border-base-300 bg-base-100 shadow-sm">
+          <div className="border-b border-base-300 bg-[linear-gradient(135deg,rgba(22,163,74,0.12),transparent_55%)] px-6 py-6">
+            {editMode ? (
+              <div className="space-y-3">
+                <input
+                  className="input input-bordered compass-input w-full max-w-xl text-xl font-semibold"
+                  value={activeConfig?.title || ''}
+                  onChange={(event) => void updateBoardMeta('title', event.target.value)}
+                  placeholder="Dashboard 标题"
+                />
+                <textarea
+                  className="textarea textarea-bordered compass-input min-h-[96px] w-full max-w-3xl"
+                  value={activeConfig?.description || ''}
+                  onChange={(event) => void updateBoardMeta('description', event.target.value)}
+                  placeholder="简单说明这块看板的用途"
+                />
+              </div>
+            ) : (
+              <>
+                <h1 className="text-3xl font-semibold tracking-tight">{activeConfig?.title || '数据看板'}</h1>
+                <p className="mt-2 max-w-3xl text-sm text-base-content/65">
+                  {activeConfig?.description || '把常用统计和关键字段固定在一个面板里，方便持续查看。'}
+                </p>
+              </>
+            )}
+
+            {pageError ? (
+              <div className="mt-4 rounded-2xl border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
+                {pageError}
+              </div>
+            ) : null}
           </div>
 
           <div className="px-6 py-5">
@@ -758,15 +789,25 @@ export default function DashboardPageClient() {
                             </div>
                           </div>
 
-                          {editMode ? (
+                          <div className="flex shrink-0 items-center gap-1">
                             <button
                               type="button"
-                              className="btn btn-ghost btn-xs opacity-100 transition lg:opacity-0 lg:group-hover:opacity-100"
-                              onClick={() => openEditor(index, widget)}
+                              className="btn btn-outline btn-xs min-h-7 h-7 px-2"
+                              onClick={() => openWidgetQuery(widget)}
+                              title="打开对应集合查询"
                             >
-                              编辑
+                              查询
                             </button>
-                          ) : null}
+                            {editMode ? (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-xs min-h-7 h-7 px-2 opacity-100 transition lg:opacity-0 lg:group-hover:opacity-100"
+                                onClick={() => openEditor(index, widget)}
+                              >
+                                编辑
+                              </button>
+                            ) : null}
+                          </div>
                         </div>
 
                         {widget.description ? (

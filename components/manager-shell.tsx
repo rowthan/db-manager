@@ -415,6 +415,7 @@ export function ManagerShell({ children }: ManagerShellProps) {
             <SheetContent
               side="left"
               className="flex h-full w-[88vw] max-w-none flex-col overflow-hidden border-[hsl(var(--app-panel-border))] bg-[hsl(var(--app-sidebar-bg))] p-0 sm:max-w-md"
+              onOpenAutoFocus={(event) => event.preventDefault()}
             >
               <SheetTitle className="sr-only">导航菜单</SheetTitle>
               {renderSidebarContent(true)}
