@@ -274,6 +274,7 @@ type PublishRecordPublishSnapshot = {
   domain: string
   enabled: boolean
   sizeBytes: number
+  description: string
 }
 
 type PublishRecordInput = {
@@ -1675,7 +1676,7 @@ function normalizePublishRecordInput(input: unknown): PublishRecordInput | null 
           return {
             key,
             include: rule.include !== false,
-            alias: String(rule.alias || key).trim() || key,
+            alias: Object.prototype.hasOwnProperty.call(rule, 'alias') ? String(rule.alias ?? '') : key,
           }
         })
         .filter((item): item is { key: string; include: boolean; alias: string } => Boolean(item))
@@ -1692,6 +1693,7 @@ function normalizePublishRecordInput(input: unknown): PublishRecordInput | null 
   const domain = String(publish.domain || '').trim()
   const enabled = publish.enabled !== false
   const sizeBytes = Math.max(0, Number(publish.sizeBytes || 0))
+  const description = String(publish.description || '').trim()
 
   if (!provider || !bucketName || !objectKey || !url) {
     return null
@@ -1726,6 +1728,7 @@ function normalizePublishRecordInput(input: unknown): PublishRecordInput | null 
       domain,
       enabled,
       sizeBytes,
+      description,
     },
     previewText,
     previewCount: Math.max(0, Number(record.previewCount || 0)),

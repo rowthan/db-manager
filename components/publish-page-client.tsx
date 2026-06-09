@@ -114,7 +114,7 @@ function createExportFieldRules(docs: Record<string, unknown>[], existingRules =
     return {
       key: field,
       include: existing?.include ?? true,
-      alias: existing?.alias?.trim() || field,
+      alias: existing ? existing.alias : field,
     }
   })
 }
@@ -253,6 +253,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
     collection: '',
     fieldRules: [],
     fileNameBase: '',
+    publishDescription: '',
     resultFormat: 'array',
     objectKeySource: 'custom',
     objectKeyField: '',
@@ -376,6 +377,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
         collection: record.source.collection,
         fieldRules: createExportFieldRules(docs, record.export.fieldRules),
         fileNameBase: record.export.fileNameBase || getDefaultExportFileNameBase(docs),
+        publishDescription: record.publish.description || '',
         resultFormat: record.export.resultFormat,
         objectKeySource: record.export.objectKeySource,
         objectKeyField: record.export.objectKeyField || getExportableFields(docs)[0] || '',
@@ -408,6 +410,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
       collection: selectedRecord.source.collection,
       fieldRules: [],
       fileNameBase: selectedRecord.export.fileNameBase,
+      publishDescription: selectedRecord.publish.description || '',
       resultFormat: selectedRecord.export.resultFormat,
       objectKeySource: selectedRecord.export.objectKeySource,
       objectKeyField: selectedRecord.export.objectKeyField,
@@ -439,6 +442,11 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
 
     if (!republishPreviewText.trim() || republishPreviewError) {
       setRepublishError('请先加载最新发布数据')
+      return
+    }
+
+    if (!republishExportModal.publishDescription.trim()) {
+      setRepublishError('请填写发布说明')
       return
     }
 
@@ -489,6 +497,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
           domain: published.domain,
           enabled: published.enabled,
           sizeBytes: published.sizeBytes,
+          description: republishExportModal.publishDescription.trim(),
         },
         previewText: republishPreviewText,
         previewCount: republishPreviewCount,
@@ -585,6 +594,13 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
     setRepublishExportModal((prev) => ({
       ...prev,
       fileNameBase,
+    }))
+  }
+
+  function updateRepublishPublishDescription(publishDescription: string) {
+    setRepublishExportModal((prev) => ({
+      ...prev,
+      publishDescription,
     }))
   }
 
@@ -852,6 +868,12 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
                       <span>大小：{formatBytes(selectedRecord.publish.sizeBytes)}</span>
                     </div>
                     <div>
+                      <div className="text-base-content/50">发布说明</div>
+                      <div className="mt-1 whitespace-pre-wrap rounded-lg bg-base-200 p-2 text-xs">
+                        {selectedRecord.publish.description || '-'}
+                      </div>
+                    </div>
+                    <div>
                       <div className="text-base-content/50">URL</div>
                       <div className="mt-1 break-all rounded-lg bg-base-200 p-2 font-mono text-xs">
                         {selectedRecord.publish.url}
@@ -905,6 +927,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
         onSetObjectKeySource={setRepublishObjectKeySource}
         onSetObjectKeyField={setRepublishObjectKeyField}
         onUpdateFileNameBase={updateRepublishFileNameBase}
+        onUpdatePublishDescription={updateRepublishPublishDescription}
         onCopyCloudflarePublishUrl={copyRepublishCloudflareUrl}
         onPublishToCloudflare={() => void publishAgain()}
         onDownloadJson={() => void downloadRepublishJson()}

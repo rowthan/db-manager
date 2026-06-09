@@ -9,6 +9,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from './ui/sheet'
 
 const STORAGE_DATABASE_KEY = 'db-page:selected-database'
 const STORAGE_COLLECTION_KEY = 'db-page:selected-collection'
+const STORAGE_FAVORITE_COLLECTIONS_KEY = 'db-page:favorite-collections'
 
 type ManagerShellProps = {
   children: ReactNode
@@ -21,6 +22,23 @@ const NAV_ITEMS = [
   { href: '/settings', label: '设置', icon: '⚙' },
 ]
 
+function getCollectionFavoriteKey(database: string, collection: string) {
+  return `${database}::${collection}`
+}
+
+function parseStoredFavoriteCollections(value: string | null) {
+  if (!value) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 export function ManagerShell({ children }: ManagerShellProps) {
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -31,6 +49,7 @@ export function ManagerShell({ children }: ManagerShellProps) {
   const [selectedCollection, setSelectedCollection] = useState('')
   const [expandedDatabases, setExpandedDatabases] = useState<string[]>([])
   const [collectionFilter, setCollectionFilter] = useState('')
+  const [favoriteCollections, setFavoriteCollections] = useState<string[]>([])
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [createCollectionModal, setCreateCollectionModal] = useState<{
     open: boolean
@@ -56,9 +75,13 @@ export function ManagerShell({ children }: ManagerShellProps) {
 
     const database = routeDatabase || window.localStorage.getItem(STORAGE_DATABASE_KEY) || ''
     const collection = routeCollection || window.localStorage.getItem(STORAGE_COLLECTION_KEY) || ''
+    const storedFavoriteCollections = parseStoredFavoriteCollections(
+      window.localStorage.getItem(STORAGE_FAVORITE_COLLECTIONS_KEY)
+    )
 
     setSelectedDatabase(database)
     setSelectedCollection(collection)
+    setFavoriteCollections(storedFavoriteCollections)
     if (database) {
       setExpandedDatabases((prev) => (prev.includes(database) ? prev : [...prev, database]))
     }
@@ -141,6 +164,19 @@ export function ManagerShell({ children }: ManagerShellProps) {
     setMobileMenuOpen(false)
   }
 
+  function toggleFavoriteCollection(database: string, collection: string) {
+    const favoriteKey = getCollectionFavoriteKey(database, collection)
+    setFavoriteCollections((prev) => {
+      const next = prev.includes(favoriteKey)
+        ? prev.filter((item) => item !== favoriteKey)
+        : [...prev, favoriteKey]
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(STORAGE_FAVORITE_COLLECTIONS_KEY, JSON.stringify(next))
+      }
+      return next
+    })
+  }
+
   function openCreateCollectionModal(database: string) {
     setCreateCollectionModal({
       open: true,
@@ -221,8 +257,15 @@ export function ManagerShell({ children }: ManagerShellProps) {
     () =>
       (meta?.collections || []).filter((item) =>
         item.name.toLowerCase().includes(collectionFilter.trim().toLowerCase())
-      ).toSorted((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' })),
-    [collectionFilter, meta?.collections]
+      ).toSorted((a, b) => {
+        const aFavorite = favoriteCollections.includes(getCollectionFavoriteKey(selectedDatabase, a.name))
+        const bFavorite = favoriteCollections.includes(getCollectionFavoriteKey(selectedDatabase, b.name))
+        if (aFavorite !== bFavorite) {
+          return aFavorite ? -1 : 1
+        }
+        return a.name.localeCompare(b.name, 'en', { sensitivity: 'base' })
+      }),
+    [collectionFilter, favoriteCollections, meta?.collections, selectedDatabase]
   )
 
   const connectionLabel = meta?.connectionLabel || 'MongoDB'
@@ -333,20 +376,48 @@ export function ManagerShell({ children }: ManagerShellProps) {
                   {expanded ? (
                     <div className="ml-5 mt-1 space-y-0.5 border-l border-base-300 pl-3">
                       {active && activeCollections.length ? (
-                        activeCollections.map((collection) => (
-                          <button
-                            key={collection.name}
-                            type="button"
-                            className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left hover:bg-base-200 ${selectedCollection === collection.name ? 'bg-success/10 text-success' : ''}`}
-                            onClick={() => openCollection(database.name, collection.name)}
-                          >
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span className="text-sm text-base-content/45">▦</span>
-                              <span className="truncate font-medium">{collection.name}</span>
+                        activeCollections.map((collection) => {
+                          const favorite = favoriteCollections.includes(
+                            getCollectionFavoriteKey(database.name, collection.name)
+                          )
+                          return (
+                            <div
+                              key={collection.name}
+                              className={`flex w-full items-center gap-1 rounded-lg px-2 py-1.5 hover:bg-base-200 ${selectedCollection === collection.name ? 'bg-success/10 text-success' : ''}`}
+                            >
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-0.5 text-left"
+                                onClick={() => openCollection(database.name, collection.name)}
+                              >
+                                <span className="text-sm text-base-content/45">▦</span>
+                                <span className="truncate font-medium">{collection.name}</span>
+                              </button>
+                              <button
+                                type="button"
+                                className={`btn btn-ghost btn-xs h-7 min-h-7 w-7 shrink-0 p-0 ${
+                                  favorite ? 'text-warning' : 'text-base-content/30 hover:text-warning'
+                                }`}
+                                title={favorite ? '取消收藏集合' : '收藏集合'}
+                                aria-label={`${favorite ? '取消收藏' : '收藏'} ${collection.name}`}
+                                onClick={(e) => {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  toggleFavoriteCollection(database.name, collection.name)
+                                }}
+                              >
+                                {favorite ? '★' : '☆'}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-xs h-7 min-h-7 shrink-0 px-1.5 text-base-content/35"
+                                onClick={() => openCollection(database.name, collection.name)}
+                              >
+                                打开
+                              </button>
                             </div>
-                            <span className="text-xs text-base-content/35">打开</span>
-                          </button>
-                        ))
+                          )
+                        })
                       ) : active ? (
                         <div className="px-3 py-2 text-sm text-base-content/45">暂无集合</div>
                       ) : (

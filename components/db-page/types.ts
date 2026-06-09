@@ -166,6 +166,7 @@ export type ExportModalState = {
   collection: string
   fieldRules: ExportFieldRule[]
   fileNameBase: string
+  publishDescription: string
   resultFormat: ExportResultFormat
   objectKeySource: ExportObjectKeySource
   objectKeyField: string
@@ -220,6 +221,7 @@ export type PublishRecordPublishSnapshot = {
   domain: string
   enabled: boolean
   sizeBytes: number
+  description: string
 }
 
 export type PublishRecord = {

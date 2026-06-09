@@ -2476,7 +2476,7 @@ function createExportFieldRules(docs: QueryDoc[], existingRules: ExportFieldRule
     return {
       key: field,
       include: existing?.include ?? true,
-      alias: existing?.alias?.trim() || field,
+      alias: existing ? existing.alias : field,
     }
   })
 }
@@ -3549,6 +3549,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     collection: '',
     fieldRules: [],
     fileNameBase: '',
+    publishDescription: '',
     resultFormat: 'array',
     objectKeySource: 'custom',
     objectKeyField: '',
@@ -4829,6 +4830,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       collection,
       fieldRules: createExportFieldRules(docs),
       fileNameBase: getDefaultExportFileNameBase(docs),
+      publishDescription: '',
       resultFormat: 'array',
       objectKeySource: defaultObjectKeySource,
       objectKeyField: defaultObjectKeyField,
@@ -4845,6 +4847,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       collection: '',
       fieldRules: [],
       fileNameBase: '',
+      publishDescription: '',
       resultFormat: 'array',
       objectKeySource: 'custom',
       objectKeyField: '',
@@ -4940,6 +4943,13 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     }))
   }
 
+  function updateExportPublishDescription(publishDescription: string) {
+    setExportModal((prev) => ({
+      ...prev,
+      publishDescription,
+    }))
+  }
+
   function copyCloudflarePublishUrl() {
     if (!cloudflarePublishResult?.url || typeof navigator === 'undefined' || !navigator.clipboard) {
       return
@@ -4985,6 +4995,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         domain: publishResult.domain,
         enabled: publishResult.enabled,
         sizeBytes: publishResult.sizeBytes,
+        description: exportModal.publishDescription.trim(),
       },
       previewText: exportPreviewText,
       previewCount: exportModal.docs.length,
@@ -5038,6 +5049,11 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
     if (!cloudflarePublishConfigured) {
       setCloudflarePublishError('请先在服务端环境变量中配置 Cloudflare 发布参数')
+      return
+    }
+
+    if (!exportModal.publishDescription.trim()) {
+      setCloudflarePublishError('请填写发布说明')
       return
     }
 
@@ -9847,20 +9863,20 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                         documentTableDraft.map((item, index) => (
                           <div
                             key={item.id}
-                            className="grid gap-2 rounded-xl border border-base-300 bg-base-200 p-3 md:grid-cols-[120px_minmax(0,1fr)_1fr_auto]"
+                            className="grid gap-2 rounded-xl border border-base-300 bg-base-200 p-3 md:grid-cols-[72px_220px_minmax(0,1fr)_44px]"
                           >
-                            <div className="flex items-center gap-2">
-                              <span className="badge badge-outline badge-sm capitalize">{item.type}</span>
-                            {fieldSettingsByKey.get(item.key)?.required ? (
-                              <span className="badge badge-error badge-sm">必填</span>
-                            ) : null}
-                            <span className="text-xs text-base-content/50">类型</span>
-                          </div>
+                            <div className="flex min-w-0 flex-col items-start justify-end gap-1">
+                              <span className="text-xs text-base-content/50">类型</span>
+                              <span className="badge badge-outline badge-sm max-w-full truncate capitalize">{item.type}</span>
+                              {fieldSettingsByKey.get(item.key)?.required ? (
+                                <span className="badge badge-error badge-sm">必填</span>
+                              ) : null}
+                            </div>
 
-                            <label className="form-control">
+                            <label className="form-control min-w-0">
                               <span className="label-text text-xs">字段名</span>
                               <input
-                                className="input input-bordered input-sm font-mono"
+                                className="input input-bordered input-sm w-full font-mono"
                                 value={item.key}
                                 onChange={(e) =>
                                   setDocumentTableDraft((prev) =>
@@ -9896,7 +9912,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                               })()}
                             </label>
 
-                            <label className="form-control">
+                            <label className="form-control min-w-0">
                               <span className="label-text text-xs">字段值</span>
                               {item.type === 'boolean' ? (
                                 <div className="flex items-center gap-3 rounded-lg border border-base-300 bg-base-100 px-3 py-2">
@@ -9965,7 +9981,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                                   ) : (
                                     <>
                                       <textarea
-                                        className="textarea textarea-bordered min-h-28 font-mono text-sm"
+                                        className="textarea textarea-bordered min-h-28 w-full font-mono text-sm"
                                         value={item.valueText}
                                         onChange={(e) =>
                                           updateDocumentTableDraftItem(index, {
@@ -9985,7 +10001,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                                 <>
                                   <input
                                     type="datetime-local"
-                                    className="input input-bordered input-sm font-mono"
+                                    className="input input-bordered input-sm w-full font-mono"
                                     value={toDateTimeLocalValue(item.valueText)}
                                     onChange={(e) =>
                                       setDocumentTableDraft((prev) =>
@@ -10009,7 +10025,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
                               ) : (
                                 <>
                                   <input
-                                    className="input input-bordered input-sm font-mono"
+                                    className="input input-bordered input-sm w-full font-mono"
                                     value={item.valueText}
                                     onChange={(e) =>
                                       setDocumentTableDraft((prev) =>
@@ -10178,6 +10194,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
           onSetObjectKeySource={setExportObjectKeySource}
           onSetObjectKeyField={setExportObjectKeyField}
           onUpdateFileNameBase={updateExportFileNameBase}
+          onUpdatePublishDescription={updateExportPublishDescription}
           onCopyCloudflarePublishUrl={copyCloudflarePublishUrl}
           onPublishToCloudflare={() => void publishExportDocumentsToCloudflare()}
           onDownloadJson={() => void downloadExportDocuments()}

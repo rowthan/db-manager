@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import type { ReactNode } from 'react'
+import { InfoCircledIcon } from '@radix-ui/react-icons'
 import type {
   CloudflarePublishResult,
   ExportFieldRule,
@@ -30,6 +31,7 @@ type ExportDialogProps = {
   onSetObjectKeySource: (objectKeySource: ExportObjectKeySource) => void
   onSetObjectKeyField: (objectKeyField: string) => void
   onUpdateFileNameBase: (fileNameBase: string) => void
+  onUpdatePublishDescription: (description: string) => void
   onCopyCloudflarePublishUrl: () => void
   onPublishToCloudflare: () => void
   onDownloadJson: () => void
@@ -58,6 +60,7 @@ export function ExportDialog({
   onSetObjectKeySource,
   onSetObjectKeyField,
   onUpdateFileNameBase,
+  onUpdatePublishDescription,
   onCopyCloudflarePublishUrl,
   onPublishToCloudflare,
   onDownloadJson,
@@ -109,12 +112,12 @@ export function ExportDialog({
                     modal.fieldRules.map((rule) => (
                       <div
                         key={rule.key}
-                        className="rounded-xl border border-base-300 bg-base-100 px-3 py-3"
+                        className="rounded-xl border border-base-300 bg-base-100 px-3 py-2"
                       >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="break-all font-mono text-sm">{rule.key}</div>
-                            <div className="text-xs text-base-content/50">原始字段名</div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex min-w-0 items-baseline gap-2">
+                            <div className="truncate font-mono text-sm">{rule.key}</div>
+                            <div className="shrink-0 text-xs text-base-content/50">/ 原始字段名</div>
                           </div>
                           <label className="flex cursor-pointer items-center gap-2 text-sm">
                             <span className="text-xs text-base-content/50">保留</span>
@@ -127,8 +130,8 @@ export function ExportDialog({
                           </label>
                         </div>
 
-                        <label className="mt-3 block">
-                          <div className="mb-1 text-xs text-base-content/50">导出名（留空则直接输出值）</div>
+                        <label className="mt-2 grid items-center gap-2 sm:grid-cols-[72px_minmax(0,1fr)]">
+                          <div className="text-xs text-base-content/50">导出名 /</div>
                           <input
                             className="input input-bordered input-sm w-full"
                             value={rule.alias}
@@ -274,21 +277,31 @@ export function ExportDialog({
                     将当前预览内容上传到 R2，并返回可访问的 CDN 链接。
                   </div>
                 </div>
-                <div className="text-xs text-base-content/50">
-                  {cloudflarePublishConfigured ? '已从服务端环境变量读取配置' : '请先在服务端环境变量中配置 Cloudflare 发布参数'}
-                </div>
-              </div>
-
-              <div className="mt-3 rounded-xl border border-base-300 bg-base-100 p-3 text-sm text-base-content/70">
-                {cloudflareConfigHint || (
-                  <>
-                    Cloudflare 配置现在从环境变量读取，不需要在这里手动填写。
-                    <div className="mt-1 text-xs text-base-content/50">
-                      需要的变量包括 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_R2_BUCKET`、`CLOUDFLARE_API_TOKEN`
-                      ，可选 `CLOUDFLARE_R2_PUBLIC_BASE_URL`。
+                <div className="flex items-center gap-1.5 text-xs text-base-content/50">
+                  <span>
+                    {cloudflarePublishConfigured ? '已从服务端环境变量读取配置' : '请先在服务端环境变量中配置 Cloudflare 发布参数'}
+                  </span>
+                  <span className="group relative inline-flex">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-xs h-6 min-h-6 w-6 rounded-full p-0 text-base-content/45 hover:text-primary focus:text-primary"
+                      aria-label="Cloudflare 配置说明"
+                    >
+                      <InfoCircledIcon className="h-4 w-4" />
+                    </button>
+                    <div className="invisible absolute right-0 top-full z-40 mt-2 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-base-300 bg-base-100 p-3 text-left text-sm leading-6 text-base-content/70 opacity-0 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+                      {cloudflareConfigHint || (
+                        <>
+                          Cloudflare 配置现在从环境变量读取，不需要在这里手动填写。
+                          <div className="mt-1 text-xs text-base-content/50">
+                            需要的变量包括 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_R2_BUCKET`、`CLOUDFLARE_API_TOKEN`
+                            ，可选 `CLOUDFLARE_R2_PUBLIC_BASE_URL`。
+                          </div>
+                        </>
+                      )}
                     </div>
-                  </>
-                )}
+                  </span>
+                </div>
               </div>
 
               <div className="mt-3 rounded-xl border border-base-300 bg-base-100 p-3">
@@ -310,6 +323,15 @@ export function ExportDialog({
                     value={modal.fileNameBase}
                     onChange={(e) => onUpdateFileNameBase(e.target.value)}
                     placeholder="export"
+                  />
+                </label>
+                <label className="mt-3 block">
+                  <div className="mb-1 text-xs text-base-content/50">发布说明 <span className="text-error">*</span></div>
+                  <textarea
+                    className="textarea textarea-bordered textarea-sm min-h-[72px] w-full"
+                    value={modal.publishDescription}
+                    onChange={(e) => onUpdatePublishDescription(e.target.value)}
+                    placeholder="例如：套餐配置公开 JSON，供客户端读取"
                   />
                 </label>
               </div>
@@ -355,7 +377,12 @@ export function ExportDialog({
             <button
               className="btn btn-secondary btn-sm"
               onClick={onPublishToCloudflare}
-              disabled={cloudflarePublishing || Boolean(previewError) || !cloudflarePublishConfigured}
+              disabled={
+                cloudflarePublishing ||
+                Boolean(previewError) ||
+                !cloudflarePublishConfigured ||
+                !modal.publishDescription.trim()
+              }
             >
               {cloudflarePublishing ? '发布中...' : '发布到 Cloudflare'}
             </button>

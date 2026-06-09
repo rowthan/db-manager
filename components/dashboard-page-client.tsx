@@ -3,6 +3,18 @@
 import type { Dispatch, SetStateAction } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  BarChartIcon,
+  CheckIcon,
+  Cross2Icon,
+  MagnifyingGlassIcon,
+  Pencil2Icon,
+  PlusIcon,
+  ReloadIcon,
+  TableIcon,
+  TrashIcon,
+  ValueIcon,
+} from '@radix-ui/react-icons'
 import type { MongoMeta } from './db-page/types'
 
 const DEFAULT_SLOT_COUNT = 8
@@ -84,6 +96,9 @@ type EditorState = {
   loadingMeta: boolean
   sourceOptions: SavedSyntaxOption[]
   loadingSources: boolean
+  previewLoading: boolean
+  previewJson: string
+  previewError: string
   error: string
 }
 
@@ -132,6 +147,9 @@ export default function DashboardPageClient() {
   const [saving, setSaving] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [pageError, setPageError] = useState('')
+  const [confirmDeleteDashboardId, setConfirmDeleteDashboardId] = useState('')
+  const [draggingSlotIndex, setDraggingSlotIndex] = useState<number | null>(null)
+  const [dragOverSlotIndex, setDragOverSlotIndex] = useState<number | null>(null)
   const [widgetStates, setWidgetStates] = useState<Record<string, WidgetRuntimeState>>({})
   const [createDashboardState, setCreateDashboardState] = useState<CreateDashboardState>({
     open: false,
@@ -150,6 +168,9 @@ export default function DashboardPageClient() {
     loadingMeta: false,
     sourceOptions: [],
     loadingSources: false,
+    previewLoading: false,
+    previewJson: '',
+    previewError: '',
     error: '',
   })
   const activeConfig = useMemo(
@@ -346,6 +367,9 @@ export default function DashboardPageClient() {
       loadingMeta: false,
       sourceOptions: [],
       loadingSources: false,
+      previewLoading: false,
+      previewJson: '',
+      previewError: '',
       error: '',
     })
   }
@@ -360,6 +384,9 @@ export default function DashboardPageClient() {
       loadingMeta: false,
       sourceOptions: [],
       loadingSources: false,
+      previewLoading: false,
+      previewJson: '',
+      previewError: '',
       error: '',
     }))
   }
@@ -474,6 +501,135 @@ export default function DashboardPageClient() {
     }
   }
 
+  async function previewEditorSourceResult() {
+    const database = editor.form.database.trim()
+    const collection = editor.form.collection.trim()
+    const sourceName = editor.form.sourceName.trim()
+    const selectedSource = editor.sourceOptions.find((item) => item.name === sourceName)
+
+    if (!database || !collection || !sourceName || !selectedSource) {
+      setEditor((prev) => ({
+        ...prev,
+        previewJson: '',
+        previewError: '请先选择数据库、集合和数据来源',
+      }))
+      return
+    }
+
+    setEditor((prev) => ({
+      ...prev,
+      previewLoading: true,
+      previewJson: '',
+      previewError: '',
+    }))
+
+    try {
+      let previewValue: unknown
+
+      if (editor.form.sourceKind === 'queryCount') {
+        if (selectedSource.queryType === 'aggregation') {
+          const response = await fetch('/api/db/aggregate', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              database,
+              collection,
+              pipeline: selectedSource.pipelineText || '[]',
+              limit: 200,
+            }),
+          })
+          const payload = (await response.json()) as { ok?: boolean; total?: number; error?: string }
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.error || '运行数据来源失败')
+          }
+          previewValue = { total: payload.total ?? 0 }
+        } else {
+          const response = await fetch('/api/db/query', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              database,
+              collection,
+              filter: selectedSource.filterText || '{}',
+              pageSize: 1,
+              page: 0,
+            }),
+          })
+          const payload = (await response.json()) as { ok?: boolean; total?: number; error?: string }
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.error || '运行数据来源失败')
+          }
+          previewValue = { total: payload.total ?? 0 }
+        }
+      } else if (selectedSource.queryType === 'aggregation') {
+        const response = await fetch('/api/db/aggregate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            database,
+            collection,
+            pipeline: selectedSource.pipelineText || '[]',
+            limit: 20,
+          }),
+        })
+        const payload = (await response.json()) as {
+          ok?: boolean
+          list?: Record<string, unknown>[]
+          total?: number
+          error?: string
+        }
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || '运行数据来源失败')
+        }
+        previewValue = payload.list?.[0] ?? null
+      } else {
+        const response = await fetch('/api/db/query', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            database,
+            collection,
+            filter: selectedSource.filterText || '{}',
+            projection: selectedSource.projectionText || '{}',
+            sort: selectedSource.sortText || '{}',
+            findOne: true,
+          }),
+        })
+        const payload = (await response.json()) as {
+          ok?: boolean
+          list?: Record<string, unknown>[]
+          error?: string
+        }
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || '运行数据来源失败')
+        }
+        previewValue = payload.list?.[0] ?? null
+      }
+
+      setEditor((prev) => ({
+        ...prev,
+        previewLoading: false,
+        previewJson: JSON.stringify(previewValue, null, 2),
+        previewError: '',
+      }))
+    } catch (error) {
+      setEditor((prev) => ({
+        ...prev,
+        previewLoading: false,
+        previewJson: '',
+        previewError: error instanceof Error ? error.message : '运行数据来源失败',
+      }))
+    }
+  }
+
   async function saveWidget() {
     if (!activeConfig) {
       return
@@ -528,6 +684,23 @@ export default function DashboardPageClient() {
     } catch {}
   }
 
+  async function moveSlot(fromIndex: number, toIndex: number) {
+    if (!activeConfig || fromIndex === toIndex) {
+      return
+    }
+
+    const nextSlots = [...slots]
+    const [moved] = nextSlots.splice(fromIndex, 1)
+    nextSlots.splice(toIndex, 0, moved)
+
+    try {
+      await persistConfig({
+        ...activeConfig,
+        slots: trimTrailingEmptySlots(nextSlots),
+      })
+    } catch {}
+  }
+
   function updateBoardMeta(field: 'title' | 'description', value: string) {
     if (!activeConfig) {
       return
@@ -536,16 +709,6 @@ export default function DashboardPageClient() {
     setDashboards((prev) =>
       prev.map((item) => (item.id === activeConfig.id ? { ...item, [field]: value } : item))
     )
-  }
-
-  async function saveBoardMeta() {
-    if (!activeConfig) {
-      return
-    }
-
-    try {
-      await persistConfig(activeConfig)
-    } catch {}
   }
 
   function openCreateDashboard() {
@@ -588,8 +751,8 @@ export default function DashboardPageClient() {
     } catch {}
   }
 
-  async function deleteCurrentDashboard() {
-    if (!activeConfig) {
+  async function deleteDashboard(targetDashboard: DashboardConfig | null) {
+    if (!targetDashboard) {
       return
     }
 
@@ -598,15 +761,11 @@ export default function DashboardPageClient() {
       return
     }
 
-    if (!window.confirm(`确认删除看板「${activeConfig.title}」吗？`)) {
-      return
-    }
-
     setSaving(true)
     setPageError('')
     try {
       const url = new URL('/api/db/dashboard', window.location.origin)
-      url.searchParams.set('id', activeConfig.id)
+      url.searchParams.set('id', targetDashboard.id)
       const response = await fetch(url.toString(), {
         method: 'DELETE',
       })
@@ -615,9 +774,12 @@ export default function DashboardPageClient() {
         throw new Error(payload.error || '删除 dashboard 失败')
       }
 
-      const nextDashboards = dashboards.filter((item) => item.id !== activeConfig.id)
+      const nextDashboards = dashboards.filter((item) => item.id !== targetDashboard.id)
       setDashboards(nextDashboards)
-      setActiveDashboardId(nextDashboards[0]?.id || 'main')
+      if (activeDashboardId === targetDashboard.id) {
+        setActiveDashboardId(nextDashboards[0]?.id || 'main')
+      }
+      setConfirmDeleteDashboardId('')
     } catch (error) {
       setPageError(error instanceof Error ? error.message : '删除 dashboard 失败')
     } finally {
@@ -649,6 +811,8 @@ export default function DashboardPageClient() {
     )
   }
 
+  const refreshing = Object.values(widgetStates).some((item) => item.loading)
+
   return (
     <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top_left,rgba(22,163,74,0.12),transparent_28%),linear-gradient(180deg,hsl(var(--app-shell-bg)),hsl(var(--app-shell-bg)))] px-4 py-6 lg:px-8">
       <div className="mx-auto grid max-w-7xl gap-5 md:grid-cols-[240px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)]">
@@ -661,36 +825,9 @@ export default function DashboardPageClient() {
           <div className="mt-4 space-y-2">
             <div className="px-1 text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">操作</div>
             <button type="button" className="btn btn-outline btn-sm w-full justify-start" onClick={openCreateDashboard} disabled={saving}>
+              <PlusIcon className="h-4 w-4" />
               新增看板
             </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm w-full justify-start"
-              onClick={() => void refreshDashboardValues(slots)}
-              disabled={saving}
-            >
-              刷新数据
-            </button>
-            <button
-              type="button"
-              className={`btn btn-sm w-full justify-start ${editMode ? 'btn-primary' : 'btn-outline'}`}
-              onClick={() => setEditMode((prev) => !prev)}
-            >
-              {editMode ? '退出编辑' : '编辑模式'}
-            </button>
-            {editMode ? (
-              <div className="space-y-2 rounded-lg border border-base-300 bg-base-200/35 p-2">
-                <button type="button" className="btn btn-outline btn-sm w-full justify-start" onClick={() => void appendSlot()} disabled={saving}>
-                  新增格子
-                </button>
-                <button type="button" className="btn btn-primary btn-sm w-full justify-start" onClick={() => void saveBoardMeta()} disabled={saving}>
-                  {saving ? '保存中...' : '保存看板'}
-                </button>
-                <button type="button" className="btn btn-outline btn-sm w-full justify-start text-error" onClick={() => void deleteCurrentDashboard()} disabled={saving || dashboards.length <= 1}>
-                  删除看板
-                </button>
-              </div>
-            ) : null}
           </div>
 
           <div className="mt-5 space-y-2">
@@ -701,22 +838,66 @@ export default function DashboardPageClient() {
             <div className="space-y-1">
               {dashboards.map((dashboard) => {
                 const active = dashboard.id === activeConfig?.id
+                const confirmingDelete = confirmDeleteDashboardId === dashboard.id
                 return (
-                  <button
+                  <div
                     key={dashboard.id}
-                    type="button"
-                    className={`flex w-full flex-col rounded-lg border px-3 py-2 text-left transition ${
+                    className={`flex w-full items-center rounded-lg border transition ${
                       active
                         ? 'border-success/30 bg-success/10 text-success'
                         : 'border-transparent text-base-content/70 hover:border-base-300 hover:bg-base-200/60'
                     }`}
-                    onClick={() => setActiveDashboardId(dashboard.id)}
                   >
-                    <span className="truncate text-sm font-semibold">{dashboard.title}</span>
-                    <span className="mt-0.5 truncate text-xs text-base-content/45">
-                      {dashboard.slots.filter(Boolean).length} 个指标
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 flex-col px-3 py-2 text-left"
+                      onClick={() => {
+                        setActiveDashboardId(dashboard.id)
+                        setConfirmDeleteDashboardId('')
+                      }}
+                    >
+                      <span className="truncate text-sm font-semibold">{dashboard.title}</span>
+                      <span className="mt-0.5 truncate text-xs text-base-content/45">
+                        {dashboard.slots.filter(Boolean).length} 个指标
+                      </span>
+                    </button>
+                    <div className="flex shrink-0 items-center gap-1 pr-2">
+                      {confirmingDelete ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0"
+                            onClick={() => setConfirmDeleteDashboardId('')}
+                            title="取消删除"
+                            aria-label={`取消删除 ${dashboard.title}`}
+                          >
+                            <Cross2Icon className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-error btn-xs h-7 min-h-7 w-7 p-0"
+                            onClick={() => void deleteDashboard(dashboard)}
+                            disabled={saving || dashboards.length <= 1}
+                            title="确认删除"
+                            aria-label={`确认删除 ${dashboard.title}`}
+                          >
+                            <CheckIcon className="h-3.5 w-3.5" />
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0 text-base-content/35 hover:text-error"
+                          onClick={() => setConfirmDeleteDashboardId(dashboard.id)}
+                          disabled={saving || dashboards.length <= 1}
+                          title="删除看板"
+                          aria-label={`删除 ${dashboard.title}`}
+                        >
+                          <TrashIcon className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 )
               })}
             </div>
@@ -725,29 +906,65 @@ export default function DashboardPageClient() {
 
         <section className="overflow-hidden rounded-[2rem] border border-base-300 bg-base-100 shadow-sm">
           <div className="border-b border-base-300 bg-[linear-gradient(135deg,rgba(22,163,74,0.12),transparent_55%)] px-6 py-6">
-            {editMode ? (
-              <div className="space-y-3">
-                <input
-                  className="input input-bordered compass-input w-full max-w-xl text-xl font-semibold"
-                  value={activeConfig?.title || ''}
-                  onChange={(event) => void updateBoardMeta('title', event.target.value)}
-                  placeholder="Dashboard 标题"
-                />
-                <textarea
-                  className="textarea textarea-bordered compass-input min-h-[96px] w-full max-w-3xl"
-                  value={activeConfig?.description || ''}
-                  onChange={(event) => void updateBoardMeta('description', event.target.value)}
-                  placeholder="简单说明这块看板的用途"
-                />
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              {editMode ? (
+                <div className="min-w-0 flex-1 space-y-3">
+                  <input
+                    className="input input-bordered compass-input w-full max-w-xl text-xl font-semibold"
+                    value={activeConfig?.title || ''}
+                    onChange={(event) => void updateBoardMeta('title', event.target.value)}
+                    placeholder="Dashboard 标题"
+                  />
+                  <textarea
+                    className="textarea textarea-bordered compass-input min-h-[96px] w-full max-w-3xl"
+                    value={activeConfig?.description || ''}
+                    onChange={(event) => void updateBoardMeta('description', event.target.value)}
+                    placeholder="简单说明这块看板的用途"
+                  />
+                </div>
+              ) : (
+                <div className="min-w-0 flex-1">
+                  <h1 className="text-3xl font-semibold tracking-tight">{activeConfig?.title || '数据看板'}</h1>
+                  <p className="mt-2 max-w-3xl text-sm text-base-content/65">
+                    {activeConfig?.description || '把常用统计和关键字段固定在一个面板里，方便持续查看。'}
+                  </p>
+                </div>
+              )}
+
+              <div className="flex shrink-0 items-center gap-2">
+                {editMode ? (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm h-9 min-h-9 w-9 p-0"
+                    onClick={() => void appendSlot()}
+                    disabled={saving}
+                    title="新增格子"
+                    aria-label="新增格子"
+                  >
+                    <PlusIcon className="h-4 w-4" />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm h-9 min-h-9 w-9 p-0"
+                  onClick={() => void refreshDashboardValues(slots)}
+                  disabled={saving || refreshing}
+                  title="刷新数据"
+                  aria-label="刷新数据"
+                >
+                  <ReloadIcon className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm h-9 min-h-9 w-9 p-0 ${editMode ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setEditMode((prev) => !prev)}
+                  title={editMode ? '退出编辑' : '编辑模式'}
+                  aria-label={editMode ? '退出编辑' : '编辑模式'}
+                >
+                  <Pencil2Icon className="h-4 w-4" />
+                </button>
               </div>
-            ) : (
-              <>
-                <h1 className="text-3xl font-semibold tracking-tight">{activeConfig?.title || '数据看板'}</h1>
-                <p className="mt-2 max-w-3xl text-sm text-base-content/65">
-                  {activeConfig?.description || '把常用统计和关键字段固定在一个面板里，方便持续查看。'}
-                </p>
-              </>
-            )}
+            </div>
 
             {pageError ? (
               <div className="mt-4 rounded-2xl border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
@@ -764,10 +981,54 @@ export default function DashboardPageClient() {
                 }
 
                 const runtimeState = widget ? widgetStates[widget.id] : undefined
+                const isDragging = draggingSlotIndex === index
+                const isDragTarget = dragOverSlotIndex === index && draggingSlotIndex !== null && draggingSlotIndex !== index
                 return (
                   <div
                     key={widget?.id || `empty-${index}`}
-                    className={`group relative overflow-hidden rounded-[1.6rem] border border-base-300 bg-[linear-gradient(180deg,hsl(var(--app-panel-bg)),hsl(var(--app-panel-muted)))] p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${getSizeClass(widget?.size)}`}
+                    className={`group relative overflow-hidden rounded-[1.6rem] border bg-[linear-gradient(180deg,hsl(var(--app-panel-bg)),hsl(var(--app-panel-muted)))] p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
+                      isDragTarget ? 'border-primary ring-2 ring-primary/25' : 'border-base-300'
+                    } ${isDragging ? 'opacity-50' : ''} ${editMode && widget ? 'cursor-move' : ''} ${getSizeClass(widget?.size)}`}
+                    draggable={editMode && Boolean(widget)}
+                    onDragStart={(event) => {
+                      if (!editMode || !widget) {
+                        return
+                      }
+                      event.dataTransfer.effectAllowed = 'move'
+                      event.dataTransfer.setData('text/plain', String(index))
+                      setDraggingSlotIndex(index)
+                    }}
+                    onDragEnd={() => {
+                      setDraggingSlotIndex(null)
+                      setDragOverSlotIndex(null)
+                    }}
+                    onDragOver={(event) => {
+                      if (!editMode || draggingSlotIndex === null || draggingSlotIndex === index) {
+                        return
+                      }
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                      setDragOverSlotIndex(index)
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverSlotIndex === index) {
+                        setDragOverSlotIndex(null)
+                      }
+                    }}
+                    onDrop={(event) => {
+                      if (!editMode) {
+                        return
+                      }
+                      event.preventDefault()
+                      const rawIndex = event.dataTransfer.getData('text/plain')
+                      const fromIndex = Number.parseInt(rawIndex, 10)
+                      setDraggingSlotIndex(null)
+                      setDragOverSlotIndex(null)
+                      if (!Number.isFinite(fromIndex) || fromIndex === index) {
+                        return
+                      }
+                      void moveSlot(fromIndex, index)
+                    }}
                   >
                     {!widget ? (
                       <button
@@ -784,9 +1045,7 @@ export default function DashboardPageClient() {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-lg font-semibold">{widget.title}</div>
-                            <div className="mt-1 truncate text-xs uppercase tracking-[0.18em] text-base-content/45">
-                              {formatSourceLabel(widget)}
-                            </div>
+                            <WidgetSourceMeta widget={widget} />
                           </div>
 
                           <div className="flex shrink-0 items-center gap-1">
@@ -900,6 +1159,8 @@ export default function DashboardPageClient() {
                           sourceName: '',
                         },
                         sourceOptions: [],
+                        previewJson: '',
+                        previewError: '',
                       }))
                     }}
                     disabled={editor.loadingMeta}
@@ -925,6 +1186,8 @@ export default function DashboardPageClient() {
                           sourceName: '',
                         },
                         sourceOptions: [],
+                        previewJson: '',
+                        previewError: '',
                       }))
                     }}
                     disabled={!editor.form.database || editor.loadingMeta}
@@ -988,7 +1251,14 @@ export default function DashboardPageClient() {
                 <select
                   className="select select-bordered compass-input mt-2"
                   value={editor.form.sourceName}
-                  onChange={(event) => updateEditorField('sourceName', event.target.value, setEditor)}
+                  onChange={(event) => {
+                    updateEditorField('sourceName', event.target.value, setEditor)
+                    setEditor((prev) => ({
+                      ...prev,
+                      previewJson: '',
+                      previewError: '',
+                    }))
+                  }}
                   disabled={!editor.form.database.trim() || !editor.form.collection.trim() || editor.loadingSources}
                 >
                   <option value="">
@@ -1004,8 +1274,23 @@ export default function DashboardPageClient() {
                     </option>
                   ))}
                 </select>
-                <div className="mt-2 text-xs text-base-content/50">
-                  Dashboard 直接复用 `_queries` 中已保存的查询或 pipeline，这里不再重复配置前置查询逻辑。
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs text-base-content/50">
+                    Dashboard 直接复用 `_queries` 中已保存的查询或 pipeline，这里不再重复配置前置查询逻辑。
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-xs"
+                    onClick={() => void previewEditorSourceResult()}
+                    disabled={
+                      editor.previewLoading ||
+                      !editor.form.database.trim() ||
+                      !editor.form.collection.trim() ||
+                      !editor.form.sourceName.trim()
+                    }
+                  >
+                    {editor.previewLoading ? '运行中...' : '运行数据来源'}
+                  </button>
                 </div>
               </label>
 
@@ -1019,6 +1304,26 @@ export default function DashboardPageClient() {
                     placeholder={editor.form.sourceKind === 'aggregateValue' ? '例如：total 或 metrics.today.total' : '例如：profile.nickname'}
                   />
                 </label>
+              ) : null}
+
+              {editor.previewError || editor.previewJson ? (
+                <div className="md:col-span-2 rounded-xl border border-base-300 bg-base-50 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">
+                      数据来源结果预览
+                    </div>
+                    <div className="text-xs text-base-content/45">可对照 JSON 字段填写值路径</div>
+                  </div>
+                  {editor.previewError ? (
+                    <div className="mt-3 rounded-lg border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">
+                      {editor.previewError}
+                    </div>
+                  ) : (
+                    <pre className="mt-3 max-h-72 overflow-auto rounded-lg bg-base-100 p-3 text-xs leading-6 text-base-content/80">
+                      <code>{editor.previewJson}</code>
+                    </pre>
+                  )}
+                </div>
               ) : null}
 
               <label className="form-control">
@@ -1540,22 +1845,32 @@ function getSizeClass(size: DashboardWidgetSize | undefined) {
   }
 }
 
-function formatSourceLabel(widget: DashboardWidgetConfig) {
-  const sourceMap: Record<DashboardSourceKind, string> = {
-    queryValue: 'Query Value',
-    queryCount: 'Query Count',
-    aggregateValue: 'Aggregation',
-  }
-
-  return `${sourceMap[widget.sourceKind]} · ${widget.sourceName || '未命名来源'} · ${widget.database || 'default'}.${widget.collection}`
-}
-
 function ensureSlotCount(slots: (DashboardWidgetConfig | null)[]) {
   const next = [...slots]
   while (next.length < DEFAULT_SLOT_COUNT) {
     next.push(null)
   }
   return next
+}
+
+function WidgetSourceMeta({ widget }: { widget: DashboardWidgetConfig }) {
+  const sourceMeta: Record<DashboardSourceKind, { label: string; icon: typeof ValueIcon }> = {
+    queryValue: { label: '查询取值', icon: ValueIcon },
+    queryCount: { label: '查询计数', icon: MagnifyingGlassIcon },
+    aggregateValue: { label: '聚合取值', icon: BarChartIcon },
+  }
+  const SourceIcon = sourceMeta[widget.sourceKind].icon
+  const locationLabel = `${widget.database || 'default'}.${widget.collection}`
+
+  return (
+    <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-base-content/45">
+      <SourceIcon className="h-3.5 w-3.5 shrink-0" aria-label={sourceMeta[widget.sourceKind].label} />
+      <span className="min-w-0 truncate">{widget.sourceName || '未命名来源'}</span>
+      <span className="h-1 w-1 shrink-0 rounded-full bg-base-content/20" aria-hidden="true" />
+      <TableIcon className="h-3.5 w-3.5 shrink-0" aria-label="集合" />
+      <span className="min-w-0 truncate font-mono lowercase">{locationLabel}</span>
+    </div>
+  )
 }
 
 function trimTrailingEmptySlots(slots: (DashboardWidgetConfig | null)[]) {
