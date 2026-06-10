@@ -62,6 +62,7 @@ const WORKSPACE_TAB_PREFIX = 'workspace-tab'
 
 type DatabasePageClientProps = {
   cloudflarePublishConfigured?: boolean
+  cloudflarePublicBaseUrl?: string
 }
 
 type WorkspaceContentTab = 'documents' | 'aggregations' | 'schema' | 'indexes' | 'validation'
@@ -1757,6 +1758,37 @@ function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2)
 }
 
+function decodeHtmlEntities(value: string) {
+  return value
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, '&')
+}
+
+function preserveExportTextValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return decodeHtmlEntities(value)
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => preserveExportTextValue(item))
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        preserveExportTextValue(item),
+      ])
+    )
+  }
+
+  return value
+}
+
 function createDocumentFieldDraftId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID()
@@ -2494,29 +2526,30 @@ function sanitizeExportFileNameBase(value: string) {
     .replace(/^[_\-.]+|[_\-.]+$/g, '')
 }
 
+function withDefaultJsonSuffix(fileName: string) {
+  return fileName.toLowerCase().endsWith('.json') ? fileName : `${fileName}.json`
+}
+
 function getDefaultExportFileNameBase(docs: QueryDoc[]) {
   const firstDoc = docs[0]
   const rawKey = firstDoc?.key
 
   if (typeof rawKey === 'string' && rawKey.trim()) {
-    return sanitizeExportFileNameBase(rawKey) || 'export'
+    return withDefaultJsonSuffix(sanitizeExportFileNameBase(rawKey) || 'export')
   }
 
   if (rawKey !== undefined && rawKey !== null) {
     const fallback = sanitizeExportFileNameBase(String(rawKey))
     if (fallback) {
-      return fallback
+      return withDefaultJsonSuffix(fallback)
     }
   }
 
-  return 'export'
+  return 'export.json'
 }
 
 function buildExportFileName(baseName: string, docs: QueryDoc[]) {
-  const normalizedBaseName = sanitizeExportFileNameBase(baseName) || getDefaultExportFileNameBase(docs)
-  return normalizedBaseName.toLowerCase().endsWith('.json')
-    ? normalizedBaseName
-    : `${normalizedBaseName}.json`
+  return baseName.trim() || getDefaultExportFileNameBase(docs)
 }
 
 function buildExportObjectKey(baseName: string, docs: QueryDoc[]) {
@@ -3423,7 +3456,10 @@ function ProjectionFieldPicker({ availableFields, value, onChange }: ProjectionF
   )
 }
 
-function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePageClientProps) {
+function DatabasePageInner({
+  cloudflarePublishConfigured = false,
+  cloudflarePublicBaseUrl = '',
+}: DatabasePageClientProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [meta, setMeta] = useState<MongoMeta | null>(null)
@@ -3557,6 +3593,10 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const [cloudflarePublishResult, setCloudflarePublishResult] = useState<CloudflarePublishResult | null>(null)
   const [cloudflarePublishError, setCloudflarePublishError] = useState('')
   const [cloudflarePublishing, setCloudflarePublishing] = useState(false)
+  const [exportPreviewTextOverride, setExportPreviewTextOverride] = useState<{
+    baseText: string
+    text: string
+  } | null>(null)
   const [mutatingDocument, setMutatingDocument] = useState(false)
   const [resultSelectionResetVersion, setResultSelectionResetVersion] = useState(0)
   const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([])
@@ -3607,10 +3647,17 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
   const routeProjectionText = searchParams?.get('projection') || ''
   const routeSortText = searchParams?.get('sort') || ''
   const routeFindOneText = searchParams?.get('findOne') || ''
+  const routePageText = searchParams?.get('page') || ''
   const routePageSizeText = searchParams?.get('pageSize') || ''
   const routeHasQueryParams = Boolean(
-    routeFilterText || routeProjectionText || routeSortText || routeFindOneText || routePageSizeText
+    routeFilterText ||
+      routeProjectionText ||
+      routeSortText ||
+      routeFindOneText ||
+      routePageText ||
+      routePageSizeText
   )
+  const routePage = Number.parseInt(routePageText, 10)
   const routePageSize = Number.parseInt(routePageSizeText, 10)
 
   function applyRouteQueryParams(nextForm: QueryForm): QueryForm {
@@ -3630,7 +3677,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
             ? false
             : nextForm.findOne,
       pageSize: Number.isFinite(routePageSize) && routePageSize > 0 ? routePageSize : nextForm.pageSize,
-      page: 0,
+      page: Number.isFinite(routePage) && routePage >= 0 ? routePage : 0,
     }
   }
 
@@ -3646,6 +3693,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       (!routeFindOneText ||
         nextForm.findOne ===
           (routeFindOneText === 'true' ? true : routeFindOneText === 'false' ? false : nextForm.findOne)) &&
+      (!routePageText || (Number.isFinite(routePage) && routePage >= 0 && nextForm.page === routePage)) &&
       (!routePageSizeText ||
         (Number.isFinite(routePageSize) && routePageSize > 0 && nextForm.pageSize === routePageSize))
     )
@@ -4140,7 +4188,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
         for (const rule of exportSelectedFieldRules) {
           const exportKey = rule.alias.trim() || rule.key
           if (Object.prototype.hasOwnProperty.call(doc, rule.key)) {
-            output[exportKey] = doc[rule.key]
+            output[exportKey] = preserveExportTextValue(doc[rule.key])
           }
         }
         return output
@@ -4165,8 +4213,8 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
     const singleRule = exportSelectedFieldRules[0]
     if (singleRule && exportSelectedFieldRules.length === 1 && !singleRule.alias.trim()) {
       return exportModal.docs.length === 1
-        ? exportModal.docs[0][singleRule.key]
-        : exportModal.docs.map((doc) => doc[singleRule.key])
+        ? preserveExportTextValue(exportModal.docs[0][singleRule.key])
+        : exportModal.docs.map((doc) => preserveExportTextValue(doc[singleRule.key]))
     }
 
     const buildPayload = (doc: QueryDoc) => {
@@ -4174,7 +4222,7 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       for (const rule of exportSelectedFieldRules) {
         const exportKey = rule.alias.trim() || rule.key
         if (Object.prototype.hasOwnProperty.call(doc, rule.key)) {
-          output[exportKey] = doc[rule.key]
+          output[exportKey] = preserveExportTextValue(doc[rule.key])
         }
       }
       return output
@@ -4186,7 +4234,11 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
 
     return exportModal.docs.map((doc) => buildPayload(doc))
   }, [exportModal.docs, exportModal.objectKeyField, exportModal.resultFormat, exportSelectedFieldRules])
-  const exportPreviewText = useMemo(() => prettyJson(exportPreviewData), [exportPreviewData])
+  const computedExportPreviewText = useMemo(() => prettyJson(exportPreviewData), [exportPreviewData])
+  const exportPreviewText =
+    exportPreviewTextOverride?.baseText === computedExportPreviewText
+      ? exportPreviewTextOverride.text
+      : computedExportPreviewText
 
   useEffect(() => {
     if (!filterBuilderOpen || !filterBuilderCanSync) {
@@ -4948,6 +5000,13 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
       ...prev,
       publishDescription,
     }))
+  }
+
+  function updateExportPreviewText(text: string) {
+    setExportPreviewTextOverride({
+      baseText: computedExportPreviewText,
+      text,
+    })
   }
 
   function copyCloudflarePublishUrl() {
@@ -10181,7 +10240,9 @@ function DatabasePageInner({ cloudflarePublishConfigured = false }: DatabasePage
           objectKeyFields={exportObjectKeyFields}
           previewError={exportPreviewError}
           previewText={exportPreviewText}
+          onUpdatePreviewText={updateExportPreviewText}
           cloudflarePublishConfigured={cloudflarePublishConfigured}
+          cloudflarePublicBaseUrl={cloudflarePublicBaseUrl}
           cloudflarePublishError={cloudflarePublishError}
           cloudflarePublishResult={cloudflarePublishResult}
           cloudflarePublishing={cloudflarePublishing}

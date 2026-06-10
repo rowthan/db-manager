@@ -13,10 +13,17 @@ export default function DbPage() {
       (process.env.CLOUDFLARE_R2_BUCKET || process.env.CLOUDFLARE_BUCKET_NAME) &&
       (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_R2_API_TOKEN)
   )
+  const cloudflarePublicBaseUrl =
+    process.env.CLOUDFLARE_R2_PUBLIC_BASE_URL ||
+    process.env.CLOUDFLARE_PUBLIC_BASE_URL ||
+    ''
 
   return (
     <Suspense fallback={null}>
-      <DbPageClient cloudflarePublishConfigured={cloudflarePublishConfigured} />
+      <DbPageClient
+        cloudflarePublishConfigured={cloudflarePublishConfigured}
+        cloudflarePublicBaseUrl={cloudflarePublicBaseUrl}
+      />
     </Suspense>
   )
 }

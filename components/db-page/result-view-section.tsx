@@ -244,6 +244,11 @@ export function ResultViewSection({
                       导出选中
                     </button>
                   ) : null}
+                  {onBulkDeleteDocuments ? (
+                    <button className="btn btn-error btn-outline btn-xs" onClick={() => onBulkDeleteDocuments(selectedDocs)}>
+                      删除选中
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>

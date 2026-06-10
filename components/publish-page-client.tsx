@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
 import { ExportDialog } from './db-page/export-dialog'
 import type {
@@ -14,6 +15,7 @@ import type {
 
 type PublishPageClientProps = {
   cloudflarePublishConfigured?: boolean
+  cloudflarePublicBaseUrl?: string
 }
 
 function formatBytes(input?: number) {
@@ -33,6 +35,37 @@ function formatBytes(input?: number) {
 
 function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2)
+}
+
+function decodeHtmlEntities(value: string) {
+  return value
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, '&')
+}
+
+function preserveExportTextValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return decodeHtmlEntities(value)
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => preserveExportTextValue(item))
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        preserveExportTextValue(item),
+      ])
+    )
+  }
+
+  return value
 }
 
 function formatDateTime(value?: string) {
@@ -56,6 +89,19 @@ function parsePublishRecordPreview(text: string) {
     return JSON.parse(text)
   } catch {
     return text
+  }
+}
+
+function validateJsonText(text: string) {
+  if (!text.trim()) {
+    return '请先加载发布数据'
+  }
+
+  try {
+    JSON.parse(text)
+    return ''
+  } catch {
+    return 'JSON 内容格式不正确'
   }
 }
 
@@ -132,33 +178,47 @@ function sanitizeExportFileNameBase(value: string) {
     .replace(/^[_\-.]+|[_\-.]+$/g, '')
 }
 
+function withDefaultJsonSuffix(fileName: string) {
+  return fileName.toLowerCase().endsWith('.json') ? fileName : `${fileName}.json`
+}
+
 function getDefaultExportFileNameBase(docs: Record<string, unknown>[]) {
   const firstDoc = docs[0]
   const rawKey = firstDoc?.key
 
   if (typeof rawKey === 'string' && rawKey.trim()) {
-    return sanitizeExportFileNameBase(rawKey) || 'export'
+    return withDefaultJsonSuffix(sanitizeExportFileNameBase(rawKey) || 'export')
   }
 
   if (rawKey !== undefined && rawKey !== null) {
     const fallback = sanitizeExportFileNameBase(String(rawKey))
     if (fallback) {
-      return fallback
+      return withDefaultJsonSuffix(fallback)
     }
   }
 
-  return 'export'
+  return 'export.json'
 }
 
 function buildExportFileName(baseName: string, docs: Record<string, unknown>[]) {
-  const normalizedBaseName = sanitizeExportFileNameBase(baseName) || getDefaultExportFileNameBase(docs)
-  return normalizedBaseName.toLowerCase().endsWith('.json')
-    ? normalizedBaseName
-    : `${normalizedBaseName}.json`
+  return baseName.trim() || getDefaultExportFileNameBase(docs)
 }
 
 function buildExportObjectKey(baseName: string, docs: Record<string, unknown>[]) {
   return buildExportFileName(baseName, docs)
+}
+
+function buildPublishRecordQueryHref(record: PublishRecord) {
+  const params = new URLSearchParams()
+  params.set('database', record.source.database)
+  params.set('collection', record.source.collection)
+  params.set('filter', record.source.filterText || '{}')
+  params.set('projection', record.source.projectionText || '{}')
+  params.set('sort', record.source.sortText || '{}')
+  params.set('page', String(record.source.page))
+  params.set('pageSize', String(record.source.pageSize))
+  params.set('findOne', String(record.source.findOne))
+  return `/db?${params.toString()}`
 }
 
 function buildPublishPreviewData(exportModal: ExportModalState) {
@@ -188,7 +248,7 @@ function buildPublishPreviewData(exportModal: ExportModalState) {
     for (const rule of selectedFieldRules) {
       const exportKey = rule.alias.trim() || rule.key
       if (Object.prototype.hasOwnProperty.call(doc, rule.key)) {
-        output[exportKey] = doc[rule.key]
+        output[exportKey] = preserveExportTextValue(doc[rule.key])
       }
     }
     return output
@@ -225,8 +285,8 @@ function buildPublishPreviewData(exportModal: ExportModalState) {
   const singleRule = selectedFieldRules[0]
   if (singleRule && selectedFieldRules.length === 1 && !singleRule.alias.trim()) {
     return docs.length === 1
-      ? docs[0][singleRule.key]
-      : docs.map((doc) => doc[singleRule.key])
+      ? preserveExportTextValue(docs[0][singleRule.key])
+      : docs.map((doc) => preserveExportTextValue(doc[singleRule.key]))
   }
 
   if (docs.length === 1) {
@@ -236,7 +296,10 @@ function buildPublishPreviewData(exportModal: ExportModalState) {
   return docs.map((doc) => buildPayload(doc))
 }
 
-export default function PublishPageClient({ cloudflarePublishConfigured = false }: PublishPageClientProps) {
+export default function PublishPageClient({
+  cloudflarePublishConfigured = false,
+  cloudflarePublicBaseUrl = '',
+}: PublishPageClientProps) {
   const [records, setRecords] = useState<PublishRecord[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [loading, setLoading] = useState(false)
@@ -246,6 +309,11 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
   const [republishing, setRepublishing] = useState(false)
   const [republishError, setRepublishError] = useState('')
   const [republishResult, setRepublishResult] = useState<CloudflarePublishResult | null>(null)
+  const [republishPreviewTextOverride, setRepublishPreviewTextOverride] = useState<{
+    baseText: string
+    text: string
+  } | null>(null)
+  const [republishPreviewSource, setRepublishPreviewSource] = useState<'latest' | 'previous'>('latest')
   const [republishExportModal, setRepublishExportModal] = useState<ExportModalState>({
     open: false,
     docs: [],
@@ -284,7 +352,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
       return error instanceof Error ? error.message : '生成预览失败'
     }
   }, [republishExportModal])
-  const republishPreviewText = useMemo(() => {
+  const computedRepublishPreviewText = useMemo(() => {
     if (!republishExportModal.docs.length) {
       return '[]'
     }
@@ -295,7 +363,30 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
       return ''
     }
   }, [republishExportModal])
-  const republishPreviewCount = republishExportModal.docs.length
+  const republishPreviousPreviewText = selectedRecord?.previewText?.trim() || '[]'
+  const republishPreviousPreviewError = useMemo(
+    () => validateJsonText(republishPreviousPreviewText),
+    [republishPreviousPreviewText]
+  )
+  const activeRepublishBasePreviewText =
+    republishPreviewSource === 'previous'
+      ? republishPreviousPreviewText
+      : computedRepublishPreviewText
+  const republishPreviewText =
+    republishPreviewTextOverride?.baseText === activeRepublishBasePreviewText
+      ? republishPreviewTextOverride.text
+      : activeRepublishBasePreviewText
+  const republishEditedPreviewError =
+    republishPreviewTextOverride?.baseText === activeRepublishBasePreviewText
+      ? validateJsonText(republishPreviewTextOverride.text)
+      : ''
+  const activeRepublishPreviewError =
+    republishEditedPreviewError ||
+    (republishPreviewSource === 'previous' ? republishPreviousPreviewError : republishPreviewError)
+  const republishPreviewCount =
+    republishPreviewSource === 'previous'
+      ? selectedRecord?.previewCount || 0
+      : republishExportModal.docs.length
 
   async function loadRecords() {
     setLoading(true)
@@ -342,6 +433,8 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
   }, [])
 
   async function loadLatestRepublishPreview(record: PublishRecord) {
+    setRepublishPreviewSource('latest')
+    setRepublishPreviewTextOverride(null)
     setRepublishPreviewLoading(true)
     setRepublishError('')
     setRepublishResult(null)
@@ -415,6 +508,8 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
       objectKeySource: selectedRecord.export.objectKeySource,
       objectKeyField: selectedRecord.export.objectKeyField,
     }))
+    setRepublishPreviewSource('latest')
+    setRepublishPreviewTextOverride(null)
 
     try {
       await loadLatestRepublishPreview(selectedRecord)
@@ -434,14 +529,34 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
     }))
   }
 
+  function handleUsePreviousRepublishData() {
+    setRepublishPreviewSource('previous')
+    setRepublishPreviewTextOverride(null)
+    setRepublishError('')
+    setRepublishResult(null)
+  }
+
+  async function handleUseLatestRepublishData() {
+    if (!selectedRecord) {
+      setRepublishError('请先选择一条发布记录')
+      return
+    }
+
+    try {
+      await loadLatestRepublishPreview(selectedRecord)
+    } catch (err) {
+      setRepublishError(err instanceof Error ? err.message : '加载最新发布数据失败')
+    }
+  }
+
   async function publishAgain(record: PublishRecord = selectedRecord as PublishRecord) {
     if (!record) {
       setRepublishError('请先选择一条发布记录')
       return
     }
 
-    if (!republishPreviewText.trim() || republishPreviewError) {
-      setRepublishError('请先加载最新发布数据')
+    if (!republishPreviewText.trim() || activeRepublishPreviewError) {
+      setRepublishError(activeRepublishPreviewError || '请先加载发布数据')
       return
     }
 
@@ -604,6 +719,13 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
     }))
   }
 
+  function updateRepublishPreviewText(text: string) {
+    setRepublishPreviewTextOverride({
+      baseText: activeRepublishBasePreviewText,
+      text,
+    })
+  }
+
   function copyRepublishCloudflareUrl() {
     if (!republishResult?.url || typeof navigator === 'undefined' || !navigator.clipboard) {
       return
@@ -613,7 +735,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
   }
 
   async function downloadRepublishJson() {
-    if (!republishPreviewText || republishPreviewError) {
+    if (!republishPreviewText || activeRepublishPreviewError) {
       return
     }
 
@@ -719,11 +841,19 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
                           {record.source.database}.{record.source.collection}
                         </div>
                         <div className="mt-0.5 break-all text-xs text-base-content/50">
-                          {record.export.fileNameBase}.json
+                          {record.export.fileNameBase}
                         </div>
                       </div>
                       <span className="badge badge-outline badge-sm">{record.export.resultFormat}</span>
                     </div>
+                    {record.publish.description.trim() ? (
+                      <div className="mt-2 rounded-lg border border-primary/20 bg-primary/10 px-2.5 py-2">
+                        <div className="text-[11px] font-medium text-primary/80">发布说明</div>
+                        <div className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-sm font-medium text-base-content">
+                          {record.publish.description}
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="mt-2 flex flex-wrap gap-2 text-xs text-base-content/60">
                       <span>{formatDateTime(record.createdAt)}</span>
                       <span>·</span>
@@ -784,7 +914,15 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
 
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="rounded-xl border border-base-300 bg-base-100 p-3">
-                  <div className="text-sm font-semibold">查询条件</div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold">查询条件</div>
+                    <Link
+                      className="btn btn-outline btn-xs"
+                      href={buildPublishRecordQueryHref(selectedRecord)}
+                    >
+                      打开查询
+                    </Link>
+                  </div>
                   <div className="mt-2 space-y-2 text-xs">
                     <div>
                       <div className="text-base-content/50">过滤条件</div>
@@ -834,7 +972,7 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
                     </div>
                     <div>
                       <div className="text-base-content/50">文件名</div>
-                      <div className="mt-1 rounded-lg bg-base-200 p-2 font-mono">{selectedRecord.export.fileNameBase}.json</div>
+                      <div className="mt-1 rounded-lg bg-base-200 p-2 font-mono">{selectedRecord.export.fileNameBase}</div>
                     </div>
                     <div>
                       <div className="text-base-content/50">字段映射</div>
@@ -908,13 +1046,19 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
         selectedFieldRules={republishSelectedFieldRules}
         availableFields={republishAvailableFields}
         objectKeyFields={republishObjectKeyFields}
-        previewError={republishPreviewLoading ? '' : republishPreviewError}
-        previewText={
-          republishPreviewLoading
-            ? '正在从 MongoDB 加载最新数据...'
-            : republishPreviewText || prettyJson(parsePublishRecordPreview(selectedRecord?.previewText || '[]'))
+        previewError={
+          republishPreviewSource === 'latest' && republishPreviewLoading
+            ? ''
+            : activeRepublishPreviewError
         }
+        previewText={
+          republishPreviewSource === 'latest' && republishPreviewLoading
+            ? '正在从 MongoDB 加载最新数据...'
+            : republishPreviewText
+        }
+        onUpdatePreviewText={updateRepublishPreviewText}
         cloudflarePublishConfigured={cloudflarePublishConfigured}
+        cloudflarePublicBaseUrl={selectedRecord?.publish.publicBaseUrl || selectedRecord?.publish.domain || cloudflarePublicBaseUrl}
         cloudflarePublishError={republishError}
         cloudflarePublishResult={republishResult}
         cloudflarePublishing={republishing}
@@ -931,6 +1075,30 @@ export default function PublishPageClient({ cloudflarePublishConfigured = false 
         onCopyCloudflarePublishUrl={copyRepublishCloudflareUrl}
         onPublishToCloudflare={() => void publishAgain()}
         onDownloadJson={() => void downloadRepublishJson()}
+        previewDataSourceControls={
+          <div className="join">
+            <button
+              type="button"
+              className={`btn btn-xs join-item ${
+                republishPreviewSource === 'previous' ? 'btn-primary' : 'btn-outline'
+              }`}
+              onClick={handleUsePreviousRepublishData}
+              disabled={!selectedRecord?.previewText?.trim()}
+            >
+              使用上次数据
+            </button>
+            <button
+              type="button"
+              className={`btn btn-xs join-item ${
+                republishPreviewSource === 'latest' ? 'btn-primary' : 'btn-outline'
+              }`}
+              onClick={() => void handleUseLatestRepublishData()}
+              disabled={republishPreviewLoading}
+            >
+              使用最新数据
+            </button>
+          </div>
+        }
         cloudflareConfigHint={
           <>
             默认已回填这条发布记录的导出规则和发布文件名。你可以先调整字段、导出格式、对象 key 和文件名，再重新发布最新数据。

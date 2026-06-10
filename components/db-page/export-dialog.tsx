@@ -18,7 +18,9 @@ type ExportDialogProps = {
   objectKeyFields: string[]
   previewError: string
   previewText: string
+  onUpdatePreviewText: (text: string) => void
   cloudflarePublishConfigured: boolean
+  cloudflarePublicBaseUrl?: string
   cloudflarePublishError: string
   cloudflarePublishResult: CloudflarePublishResult | null
   cloudflarePublishing: boolean
@@ -37,6 +39,7 @@ type ExportDialogProps = {
   onDownloadJson: () => void
   publishSuccessLinkHref?: string
   cloudflareConfigHint?: ReactNode
+  previewDataSourceControls?: ReactNode
 }
 
 export function ExportDialog({
@@ -47,7 +50,9 @@ export function ExportDialog({
   objectKeyFields,
   previewError,
   previewText,
+  onUpdatePreviewText,
   cloudflarePublishConfigured,
+  cloudflarePublicBaseUrl = '',
   cloudflarePublishError,
   cloudflarePublishResult,
   cloudflarePublishing,
@@ -66,10 +71,16 @@ export function ExportDialog({
   onDownloadJson,
   publishSuccessLinkHref = '/publish',
   cloudflareConfigHint,
+  previewDataSourceControls,
 }: ExportDialogProps) {
   if (!open) {
     return null
   }
+
+  const publishDomainLabel =
+    cloudflarePublishResult?.domain ||
+    cloudflarePublicBaseUrl ||
+    (cloudflarePublishConfigured ? '服务端配置域名' : '未配置')
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-300/70 p-4">
@@ -153,7 +164,27 @@ export function ExportDialog({
               <section className="flex h-full min-h-0 flex-col rounded-xl border border-base-300 bg-base-200 p-4">
                 <div className="flex flex-col gap-2 border-b border-base-300 pb-3 md:flex-row md:items-center md:justify-between">
                   <div>
-                    <div className="text-sm font-semibold">JSON 预览</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="text-sm font-semibold">JSON 预览</div>
+                      {modal.docs.length > 1 ? (
+                        <div className="join">
+                          <button
+                            type="button"
+                            className={`btn btn-xs join-item ${modal.resultFormat === 'array' ? 'btn-primary' : 'btn-outline'}`}
+                            onClick={() => onSetResultFormat('array')}
+                          >
+                            数组
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn btn-xs join-item ${modal.resultFormat === 'object' ? 'btn-primary' : 'btn-outline'}`}
+                            onClick={() => onSetResultFormat('object')}
+                          >
+                            对象
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
                     <div className="text-xs text-base-content/50">
                       {modal.docs.length === 1
                         ? `单条记录 · ${modal.database || '-'}.${modal.collection || '-'}`
@@ -165,92 +196,65 @@ export function ExportDialog({
                   </div>
                 </div>
 
-                {modal.docs.length > 1 ? (
-                  <div className="mt-4 rounded-xl border border-base-300 bg-base-100 p-3">
-                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="text-sm font-semibold">导出格式</div>
-                        <div className="text-xs text-base-content/50">
-                          多条记录默认导出为数组，也可合并为对象格式。
-                        </div>
-                      </div>
-                      <div className="join">
-                        <button
-                          type="button"
-                          className={`btn btn-sm join-item ${modal.resultFormat === 'array' ? 'btn-primary' : 'btn-outline'}`}
-                          onClick={() => onSetResultFormat('array')}
-                        >
-                          数组
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn btn-sm join-item ${modal.resultFormat === 'object' ? 'btn-primary' : 'btn-outline'}`}
-                          onClick={() => onSetResultFormat('object')}
-                        >
-                          对象
-                        </button>
-                      </div>
-                    </div>
+                {modal.docs.length > 1 && modal.resultFormat === 'object' ? (
+                  <div className="mt-3 rounded-xl border border-base-300 bg-base-100 p-3">
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {objectKeyFields.length ? (
+                        <>
+                          <label className="form-control">
+                            <span className="label-text text-xs">对象 key 来源</span>
+                            <select
+                              className="select select-bordered select-sm"
+                              value={modal.objectKeySource}
+                              onChange={(e) => onSetObjectKeySource(e.target.value as ExportObjectKeySource)}
+                            >
+                              <option value="unique">唯一键</option>
+                              <option value="custom">自定义字段</option>
+                            </select>
+                          </label>
 
-                    {modal.resultFormat === 'object' ? (
-                      <div className="mt-3 grid gap-3 md:grid-cols-2">
-                        {objectKeyFields.length ? (
-                          <>
+                          {modal.objectKeySource === 'unique' ? (
                             <label className="form-control">
-                              <span className="label-text text-xs">对象 key 来源</span>
+                              <span className="label-text text-xs">唯一键字段</span>
                               <select
                                 className="select select-bordered select-sm"
-                                value={modal.objectKeySource}
-                                onChange={(e) => onSetObjectKeySource(e.target.value as ExportObjectKeySource)}
+                                value={modal.objectKeyField}
+                                onChange={(e) => onSetObjectKeyField(e.target.value)}
                               >
-                                <option value="unique">唯一键</option>
-                                <option value="custom">自定义字段</option>
+                                {objectKeyFields.map((field) => (
+                                  <option key={field} value={field}>
+                                    {field}
+                                  </option>
+                                ))}
                               </select>
                             </label>
-
-                            {modal.objectKeySource === 'unique' ? (
-                              <label className="form-control">
-                                <span className="label-text text-xs">唯一键字段</span>
-                                <select
-                                  className="select select-bordered select-sm"
-                                  value={modal.objectKeyField}
-                                  onChange={(e) => onSetObjectKeyField(e.target.value)}
-                                >
-                                  {objectKeyFields.map((field) => (
-                                    <option key={field} value={field}>
-                                      {field}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                            ) : (
-                              <label className="form-control md:col-span-2">
-                                <span className="label-text text-xs">自定义 key 字段</span>
-                                <input
-                                  className="input input-bordered input-sm"
-                                  value={modal.objectKeyField}
-                                  onChange={(e) => onSetObjectKeyField(e.target.value)}
-                                  placeholder="例如：key / value.id / _id"
-                                />
-                              </label>
-                            )}
-                          </>
-                        ) : (
-                          <label className="form-control md:col-span-2">
-                            <span className="label-text text-xs">对象 key 字段</span>
-                            <input
-                              className="input input-bordered input-sm"
-                              value={modal.objectKeyField}
-                              onChange={(e) => onSetObjectKeyField(e.target.value)}
-                              placeholder="例如：key / value.id / _id"
-                            />
-                            <span className="mt-1 text-xs text-base-content/50">
-                              当前集合没有配置唯一键，请手动指定对象 key 字段。
-                            </span>
-                          </label>
-                        )}
-                      </div>
-                    ) : null}
+                          ) : (
+                            <label className="form-control md:col-span-2">
+                              <span className="label-text text-xs">自定义 key 字段</span>
+                              <input
+                                className="input input-bordered input-sm"
+                                value={modal.objectKeyField}
+                                onChange={(e) => onSetObjectKeyField(e.target.value)}
+                                placeholder="例如：key / value.id / _id"
+                              />
+                            </label>
+                          )}
+                        </>
+                      ) : (
+                        <label className="form-control md:col-span-2">
+                          <span className="label-text text-xs">对象 key 字段</span>
+                          <input
+                            className="input input-bordered input-sm"
+                            value={modal.objectKeyField}
+                            onChange={(e) => onSetObjectKeyField(e.target.value)}
+                            placeholder="例如：key / value.id / _id"
+                          />
+                          <span className="mt-1 text-xs text-base-content/50">
+                            当前集合没有配置唯一键，请手动指定对象 key 字段。
+                          </span>
+                        </label>
+                      )}
+                    </div>
                   </div>
                 ) : null}
 
@@ -260,11 +264,26 @@ export function ExportDialog({
                   </div>
                 ) : null}
 
-                <div className="mt-4 min-h-0 flex-1">
-                  <div className="label-text text-sm">预览内容</div>
-                  <pre className="mt-2 h-full max-h-full overflow-auto rounded-xl border border-base-300 bg-base-100 p-3 font-mono text-sm leading-6 whitespace-pre-wrap break-all">
-                    {previewText}
-                  </pre>
+                <div className="mt-4 flex min-h-0 flex-1 flex-col">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="label-text text-sm">预览内容</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {previewDataSourceControls}
+                      <button
+                        className="btn btn-primary btn-xs"
+                        onClick={onDownloadJson}
+                        disabled={Boolean(previewError)}
+                      >
+                        复制 JSON
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    className="textarea textarea-bordered mt-2 h-full min-h-[320px] max-h-full resize-none overflow-auto bg-base-100 font-mono text-sm leading-6"
+                    value={previewText}
+                    onChange={(e) => onUpdatePreviewText(e.target.value)}
+                    spellCheck={false}
+                  />
                 </div>
               </section>
             </div>
@@ -309,22 +328,30 @@ export function ExportDialog({
                   <div>
                     <div className="text-sm font-medium">发布文件名</div>
                     <div className="text-xs text-base-content/50">
-                      默认取当前结果里的 `key` 值，可手动修改；会自动补上 `.json` 后缀。
+                      默认取当前结果里的 `key` 值；输入什么文件名就发布什么文件名。
                     </div>
                   </div>
                   <div className="text-xs text-base-content/50">
                     发布和下载共用同一文件名
                   </div>
                 </div>
-                <label className="mt-3 block">
-                  <div className="mb-1 text-xs text-base-content/50">文件名</div>
-                  <input
-                    className="input input-bordered input-sm w-full"
-                    value={modal.fileNameBase}
-                    onChange={(e) => onUpdateFileNameBase(e.target.value)}
-                    placeholder="export"
-                  />
-                </label>
+                <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]">
+                  <label className="block">
+                    <div className="mb-1 text-xs text-base-content/50">域名地址</div>
+                    <div className="flex h-8 items-center truncate rounded-lg border border-base-300 bg-base-200 px-3 font-mono text-xs text-base-content/60">
+                      {publishDomainLabel}
+                    </div>
+                  </label>
+                  <label className="block">
+                    <div className="mb-1 text-xs text-base-content/50">文件名</div>
+                    <input
+                      className="input input-bordered input-sm w-full"
+                      value={modal.fileNameBase}
+                      onChange={(e) => onUpdateFileNameBase(e.target.value)}
+                      placeholder="export"
+                    />
+                  </label>
+                </div>
                 <label className="mt-3 block">
                   <div className="mb-1 text-xs text-base-content/50">发布说明 <span className="text-error">*</span></div>
                   <textarea
@@ -366,10 +393,6 @@ export function ExportDialog({
         </div>
 
         <div className="mt-4 flex flex-wrap justify-between gap-2 border-t border-base-300 pt-3">
-          <div className="text-xs text-base-content/50">
-            导出结果会根据所选字段过滤，并支持将字段名重命名后再导出；导出名留空时会直接输出该字段值。
-            发布到 Cloudflare 时可自定义文件名，默认使用当前记录的 `key` 值。
-          </div>
           <div className="flex flex-wrap gap-2">
             <button className="btn btn-outline btn-sm" onClick={onClose}>
               取消
@@ -385,13 +408,6 @@ export function ExportDialog({
               }
             >
               {cloudflarePublishing ? '发布中...' : '发布到 Cloudflare'}
-            </button>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={onDownloadJson}
-              disabled={Boolean(previewError)}
-            >
-              导出 JSON
             </button>
           </div>
         </div>
