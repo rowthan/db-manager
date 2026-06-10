@@ -228,6 +228,8 @@ export type PublishRecord = {
   id: string
   createdAt?: string
   updatedAt?: string
+  fileName?: string
+  description?: string
   source: PublishRecordQuerySnapshot
   export: PublishRecordExportSnapshot
   publish: PublishRecordPublishSnapshot
@@ -236,6 +238,8 @@ export type PublishRecord = {
 }
 
 export type PublishRecordInput = {
+  fileName?: string
+  description?: string
   source: PublishRecordQuerySnapshot
   export: PublishRecordExportSnapshot
   publish: PublishRecordPublishSnapshot

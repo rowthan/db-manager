@@ -278,6 +278,8 @@ type PublishRecordPublishSnapshot = {
 }
 
 type PublishRecordInput = {
+  fileName?: string
+  description?: string
   source: PublishRecordQuerySnapshot
   export: PublishRecordExportSnapshot
   publish: PublishRecordPublishSnapshot
@@ -1693,7 +1695,8 @@ function normalizePublishRecordInput(input: unknown): PublishRecordInput | null 
   const domain = String(publish.domain || '').trim()
   const enabled = publish.enabled !== false
   const sizeBytes = Math.max(0, Number(publish.sizeBytes || 0))
-  const description = String(publish.description || '').trim()
+  const description = String(record.description ?? publish.description ?? '').trim()
+  const fileName = String(record.fileName ?? fileNameBase).trim()
 
   if (!provider || !bucketName || !objectKey || !url) {
     return null
@@ -1712,7 +1715,7 @@ function normalizePublishRecordInput(input: unknown): PublishRecordInput | null 
       sourceDocumentIds,
     },
     export: {
-      fileNameBase,
+      fileNameBase: fileName || fileNameBase,
       resultFormat,
       objectKeySource,
       objectKeyField,
@@ -1730,6 +1733,8 @@ function normalizePublishRecordInput(input: unknown): PublishRecordInput | null 
       sizeBytes,
       description,
     },
+    fileName: fileName || fileNameBase,
+    description,
     previewText,
     previewCount: Math.max(0, Number(record.previewCount || 0)),
   }
@@ -1750,6 +1755,8 @@ function normalizePublishRecord(doc: unknown): (PublishRecord & { id: string }) 
     id: String(record._id || '').trim(),
     kind: 'publish',
     ...normalized,
+    fileName: normalized.fileName,
+    description: normalized.description,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
   }
@@ -2263,7 +2270,13 @@ export async function createPublishRecord(
   const now = new Date().toISOString()
   const insertDoc = {
     kind: 'publish' as const,
-    ...normalized,
+    fileName: normalized.fileName,
+    description: normalized.description,
+    source: normalized.source,
+    export: normalized.export,
+    publish: normalized.publish,
+    previewText: normalized.previewText,
+    previewCount: normalized.previewCount,
     createdAt: now,
     updatedAt: now,
   }
@@ -2316,10 +2329,32 @@ export async function listPublishRecords(input: {
     .skip(page * pageSize)
     .limit(pageSize)
     .toArray()
+  const normalizedItems = items.map((item) => normalizePublishRecord(serializeValue(item)))
+
+  await Promise.all(
+    items.map(async (item, index) => {
+      const normalized = normalizedItems[index]
+      if (!normalized || !item._id) {
+        return
+      }
+      if (item.fileName === normalized.fileName && item.description === normalized.description) {
+        return
+      }
+      await collection.updateOne(
+        { _id: item._id },
+        {
+          $set: {
+            fileName: normalized.fileName,
+            description: normalized.description,
+          },
+        }
+      )
+    })
+  )
 
   return {
     ok: true,
-    items: items.map((item) => normalizePublishRecord(serializeValue(item)) as PublishRecord & { id: string }),
+    items: normalizedItems.filter((item): item is PublishRecord & { id: string } => Boolean(item)),
     total,
     page,
     pageSize,
@@ -2348,6 +2383,29 @@ export async function getPublishRecordById(id: string) {
   }
 
   return normalized
+}
+
+export async function deletePublishRecordById(id: string) {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const client = await getMongoClient()
+  const systemDatabase = getSystemDatabaseName()
+  if (!systemDatabase) {
+    throw new Error('无法确定发布记录存储库')
+  }
+
+  const db = client.db(systemDatabase)
+  const collection = await getPublishRecordCollection(db)
+  const targetId = parseMongoId(id)
+  const result = await collection.deleteOne({ _id: targetId as any })
+
+  return {
+    ok: true as const,
+    deletedCount: result.deletedCount || 0,
+  }
 }
 
 export async function getMongoMeta(database?: string): Promise<MongoMeta> {

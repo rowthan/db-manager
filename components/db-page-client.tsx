@@ -5024,8 +5024,12 @@ function DatabasePageInner({
     const sourceDocumentIds = exportModal.docs
       .map((doc) => String(doc._id ?? '').trim())
       .filter(Boolean)
+    const fileName = exportModal.fileNameBase.trim()
+    const description = exportModal.publishDescription.trim()
 
     return {
+      fileName,
+      description,
       source: {
         database: exportModal.database,
         collection: exportModal.collection,
@@ -5054,7 +5058,7 @@ function DatabasePageInner({
         domain: publishResult.domain,
         enabled: publishResult.enabled,
         sizeBytes: publishResult.sizeBytes,
-        description: exportModal.publishDescription.trim(),
+        description,
       },
       previewText: exportPreviewText,
       previewCount: exportModal.docs.length,

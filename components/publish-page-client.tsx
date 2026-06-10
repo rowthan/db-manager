@@ -221,6 +221,14 @@ function buildPublishRecordQueryHref(record: PublishRecord) {
   return `/db?${params.toString()}`
 }
 
+function getPublishRecordFileName(record: PublishRecord) {
+  return record.fileName?.trim() || record.export.fileNameBase
+}
+
+function getPublishRecordDescription(record: PublishRecord) {
+  return record.description?.trim() || record.publish.description
+}
+
 function buildPublishPreviewData(exportModal: ExportModalState) {
   const docs = exportModal.docs
   const selectedFieldRules = exportModal.fieldRules.filter((rule) => rule.include)
@@ -306,6 +314,9 @@ export default function PublishPageClient({
   const [error, setError] = useState('')
   const [databaseFilter, setDatabaseFilter] = useState('')
   const [collectionFilter, setCollectionFilter] = useState('')
+  const [deleteRecordTarget, setDeleteRecordTarget] = useState<PublishRecord | null>(null)
+  const [deletingRecord, setDeletingRecord] = useState(false)
+  const [deleteRecordError, setDeleteRecordError] = useState('')
   const [republishing, setRepublishing] = useState(false)
   const [republishError, setRepublishError] = useState('')
   const [republishResult, setRepublishResult] = useState<CloudflarePublishResult | null>(null)
@@ -469,8 +480,8 @@ export default function PublishPageClient({
         database: record.source.database,
         collection: record.source.collection,
         fieldRules: createExportFieldRules(docs, record.export.fieldRules),
-        fileNameBase: record.export.fileNameBase || getDefaultExportFileNameBase(docs),
-        publishDescription: record.publish.description || '',
+        fileNameBase: getPublishRecordFileName(record) || getDefaultExportFileNameBase(docs),
+        publishDescription: getPublishRecordDescription(record) || '',
         resultFormat: record.export.resultFormat,
         objectKeySource: record.export.objectKeySource,
         objectKeyField: record.export.objectKeyField || getExportableFields(docs)[0] || '',
@@ -502,8 +513,8 @@ export default function PublishPageClient({
       database: selectedRecord.source.database,
       collection: selectedRecord.source.collection,
       fieldRules: [],
-      fileNameBase: selectedRecord.export.fileNameBase,
-      publishDescription: selectedRecord.publish.description || '',
+      fileNameBase: getPublishRecordFileName(selectedRecord),
+      publishDescription: getPublishRecordDescription(selectedRecord) || '',
       resultFormat: selectedRecord.export.resultFormat,
       objectKeySource: selectedRecord.export.objectKeySource,
       objectKeyField: selectedRecord.export.objectKeyField,
@@ -527,6 +538,55 @@ export default function PublishPageClient({
       ...prev,
       open: false,
     }))
+  }
+
+  function openDeletePublishRecord(record: PublishRecord) {
+    setDeleteRecordTarget(record)
+    setDeleteRecordError('')
+  }
+
+  function closeDeletePublishRecord() {
+    if (deletingRecord) {
+      return
+    }
+
+    setDeleteRecordTarget(null)
+    setDeleteRecordError('')
+  }
+
+  async function confirmDeletePublishRecord() {
+    if (!deleteRecordTarget) {
+      return
+    }
+
+    setDeletingRecord(true)
+    setDeleteRecordError('')
+
+    try {
+      const response = await fetch(`/api/db/publish-records/${encodeURIComponent(deleteRecordTarget.id)}`, {
+        method: 'DELETE',
+      })
+      const result = (await response.json()) as { ok?: boolean; error?: string }
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || '删除发布记录失败')
+      }
+
+      const deletedId = deleteRecordTarget.id
+      const nextRecords = records.filter((item) => item.id !== deletedId)
+      setDeleteRecordTarget(null)
+      setRecords(nextRecords)
+      setSelectedId((current) => {
+        if (current && current !== deletedId) {
+          return current
+        }
+        return nextRecords[0]?.id || ''
+      })
+      await loadRecords()
+    } catch (err) {
+      setDeleteRecordError(err instanceof Error ? err.message : '删除发布记录失败')
+    } finally {
+      setDeletingRecord(false)
+    }
   }
 
   function handleUsePreviousRepublishData() {
@@ -594,6 +654,8 @@ export default function PublishPageClient({
       }
 
       const recordPayload: PublishRecordInput = {
+        fileName: republishExportModal.fileNameBase.trim(),
+        description: republishExportModal.publishDescription.trim(),
         source: record.source,
         export: {
           fileNameBase: republishExportModal.fileNameBase,
@@ -827,44 +889,66 @@ export default function PublishPageClient({
               records.map((record) => {
                 const active = record.id === selectedRecord?.id
                 return (
-                  <button
+                  <div
                     key={record.id}
-                    type="button"
                     className={`w-full rounded-xl border p-3 text-left transition ${
                       active ? 'border-primary bg-primary/10' : 'border-base-300 bg-base-100 hover:bg-base-200'
                     }`}
-                    onClick={() => setSelectedId(record.id)}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold">
-                          {record.source.database}.{record.source.collection}
-                        </div>
-                        <div className="mt-0.5 break-all text-xs text-base-content/50">
-                          {record.export.fileNameBase}
-                        </div>
+                        <button
+                          type="button"
+                          className="block w-full min-w-0 text-left"
+                          onClick={() => setSelectedId(record.id)}
+                        >
+                          <div className="truncate text-sm font-semibold">
+                            {record.source.database}.{record.source.collection}
+                          </div>
+                          <div className="mt-0.5 break-all text-xs text-base-content/50">
+                            {getPublishRecordFileName(record)}
+                          </div>
+                        </button>
                       </div>
-                      <span className="badge badge-outline badge-sm">{record.export.resultFormat}</span>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="badge badge-outline badge-sm">{record.export.resultFormat}</span>
+                        {active ? (
+                          <button
+                            type="button"
+                            className="btn btn-error btn-outline btn-xs"
+                            onClick={() => openDeletePublishRecord(record)}
+                            disabled={deletingRecord}
+                          >
+                            删除
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                    {record.publish.description.trim() ? (
-                      <div className="mt-2 rounded-lg border border-primary/20 bg-primary/10 px-2.5 py-2">
+                    <button
+                      type="button"
+                      className="mt-2 block w-full text-left"
+                      onClick={() => setSelectedId(record.id)}
+                    >
+                      {getPublishRecordDescription(record).trim() ? (
+                        <div className="rounded-lg border border-primary/20 bg-primary/10 px-2.5 py-2">
                         <div className="text-[11px] font-medium text-primary/80">发布说明</div>
                         <div className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-sm font-medium text-base-content">
-                          {record.publish.description}
+                          {getPublishRecordDescription(record)}
                         </div>
+                        </div>
+                      ) : null}
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-base-content/60">
+                        <span>{formatDateTime(record.createdAt)}</span>
+                        <span>·</span>
+                        <span>{record.previewCount} 条</span>
+                        <span>·</span>
+                        <span>{formatBytes(record.publish.sizeBytes)}</span>
                       </div>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap gap-2 text-xs text-base-content/60">
-                      <span>{formatDateTime(record.createdAt)}</span>
-                      <span>·</span>
-                      <span>{record.previewCount} 条</span>
-                      <span>·</span>
-                      <span>{formatBytes(record.publish.sizeBytes)}</span>
-                    </div>
-                    <div className="mt-2 line-clamp-2 text-xs text-base-content/50">
-                      {record.publish.url}
-                    </div>
-                  </button>
+                      <div className="mt-2 line-clamp-2 text-xs text-base-content/50">
+                        {record.publish.url}
+                      </div>
+                    </button>
+                  </div>
                 )
               })
             ) : (
@@ -972,7 +1056,7 @@ export default function PublishPageClient({
                     </div>
                     <div>
                       <div className="text-base-content/50">文件名</div>
-                      <div className="mt-1 rounded-lg bg-base-200 p-2 font-mono">{selectedRecord.export.fileNameBase}</div>
+                      <div className="mt-1 rounded-lg bg-base-200 p-2 font-mono">{getPublishRecordFileName(selectedRecord)}</div>
                     </div>
                     <div>
                       <div className="text-base-content/50">字段映射</div>
@@ -1008,7 +1092,7 @@ export default function PublishPageClient({
                     <div>
                       <div className="text-base-content/50">发布说明</div>
                       <div className="mt-1 whitespace-pre-wrap rounded-lg bg-base-200 p-2 text-xs">
-                        {selectedRecord.publish.description || '-'}
+                        {getPublishRecordDescription(selectedRecord) || '-'}
                       </div>
                     </div>
                     <div>
@@ -1108,6 +1192,52 @@ export default function PublishPageClient({
           </>
         }
       />
+
+      {deleteRecordTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-300/70 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-base-100 p-4 shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-base-300 pb-3">
+              <div>
+                <h3 className="text-lg font-semibold">删除发布记录</h3>
+                <p className="text-sm text-base-content/60">
+                  删除后不会再出现在发布列表中，但不会删除已经上传到 Cloudflare 的文件。
+                </p>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={closeDeletePublishRecord} disabled={deletingRecord}>
+                关闭
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <div className="rounded-xl border border-error/30 bg-error/5 p-3 text-sm">
+                <div className="text-xs text-base-content/50">发布文件名</div>
+                <div className="mt-1 break-all font-mono">{getPublishRecordFileName(deleteRecordTarget)}</div>
+                <div className="mt-3 text-xs text-base-content/50">发布说明</div>
+                <div className="mt-1 whitespace-pre-wrap">
+                  {getPublishRecordDescription(deleteRecordTarget) || '-'}
+                </div>
+              </div>
+
+              {deleteRecordError ? (
+                <div className="alert alert-error py-2 text-sm">{deleteRecordError}</div>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-base-300 pt-3">
+              <button className="btn btn-outline btn-sm" onClick={closeDeletePublishRecord} disabled={deletingRecord}>
+                取消
+              </button>
+              <button
+                className="btn btn-error btn-sm"
+                onClick={() => void confirmDeletePublishRecord()}
+                disabled={deletingRecord}
+              >
+                {deletingRecord ? '删除中...' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
     </div>
   )
