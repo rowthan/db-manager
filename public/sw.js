@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'db-manager-v1'
+const CACHE_VERSION = 'db-manager-v2'
 const STATIC_CACHE = `${CACHE_VERSION}-static`
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`
 const STATIC_ASSETS = ['/offline.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-maskable.svg']
@@ -45,7 +45,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (request.mode === 'navigate') {
-    event.respondWith(networkFirstNavigation(request))
+    event.respondWith(staleWhileRevalidateNavigation(request, event))
     return
   }
 
@@ -57,15 +57,20 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(staleWhileRevalidate(request))
 })
 
-async function networkFirstNavigation(request) {
+async function staleWhileRevalidateNavigation(request, event) {
+  const cache = await caches.open(RUNTIME_CACHE)
+  const cached = await cache.match(request)
+
+  if (cached) {
+    event.waitUntil(fetchAndCache(request, cache))
+    return cached
+  }
+
   try {
-    const response = await fetch(request)
-    const cache = await caches.open(RUNTIME_CACHE)
-    cache.put(request, response.clone())
+    const response = await fetchAndCache(request, cache)
     return response
   } catch {
-    const cached = await caches.match(request)
-    return cached || caches.match('/offline.html')
+    return caches.match('/offline.html')
   }
 }
 
@@ -84,14 +89,15 @@ async function cacheFirst(request, cacheName) {
 async function staleWhileRevalidate(request) {
   const cache = await caches.open(RUNTIME_CACHE)
   const cached = await cache.match(request)
-  const network = fetch(request)
-    .then((response) => {
-      if (response.ok) {
-        cache.put(request, response.clone())
-      }
-      return response
-    })
-    .catch(() => cached)
+  const network = fetchAndCache(request, cache).catch(() => cached)
 
   return cached || network
+}
+
+async function fetchAndCache(request, cache) {
+  const response = await fetch(request)
+  if (response.ok) {
+    await cache.put(request, response.clone())
+  }
+  return response
 }
