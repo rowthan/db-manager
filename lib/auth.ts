@@ -3,11 +3,13 @@ const textDecoder = new TextDecoder()
 
 export const AUTH_COOKIE_NAME = 'db-manager-session'
 export const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
+export const DEFAULT_SESSION_RENEW_WINDOW_SECONDS = 60 * 60 * 24 * 3
 
 export type AuthConfig = {
   password: string
   sessionSecret: string
   sessionTtlSeconds: number
+  sessionRenewWindowSeconds: number
 }
 
 type SessionPayload = {
@@ -74,6 +76,15 @@ export function getAuthConfig(): AuthConfig | null {
     Number.isFinite(sessionTtlSecondsRaw) && sessionTtlSecondsRaw > 0
       ? sessionTtlSecondsRaw
       : DEFAULT_SESSION_TTL_SECONDS
+  const sessionRenewWindowSecondsRaw = Number(
+    process.env.DB_MANAGER_SESSION_RENEW_WINDOW_SECONDS || Math.min(DEFAULT_SESSION_RENEW_WINDOW_SECONDS, sessionTtlSeconds)
+  )
+  const sessionRenewWindowSeconds =
+    Number.isFinite(sessionRenewWindowSecondsRaw) &&
+    sessionRenewWindowSecondsRaw > 0 &&
+    sessionRenewWindowSecondsRaw <= sessionTtlSeconds
+      ? sessionRenewWindowSecondsRaw
+      : Math.min(DEFAULT_SESSION_RENEW_WINDOW_SECONDS, sessionTtlSeconds)
 
   if (!password || !sessionSecret) {
     return null
@@ -83,6 +94,7 @@ export function getAuthConfig(): AuthConfig | null {
     password,
     sessionSecret,
     sessionTtlSeconds,
+    sessionRenewWindowSeconds,
   }
 }
 
@@ -115,24 +127,33 @@ export async function createSessionToken(config: AuthConfig) {
 }
 
 export async function verifySessionToken(token: string | undefined, sessionSecret: string) {
+  const payload = await verifySessionTokenWithPayload(token, sessionSecret)
+  return payload !== null
+}
+
+export async function verifySessionTokenWithPayload(token: string | undefined, sessionSecret: string) {
   if (!token) {
-    return false
+    return null
   }
 
   const [encodedPayload, signature] = token.split('.')
   if (!encodedPayload || !signature) {
-    return false
+    return null
   }
 
   const expectedSignature = await signMessage(sessionSecret, encodedPayload)
   if (expectedSignature !== signature) {
-    return false
+    return null
   }
 
   const payload = parseSessionPayload(encodedPayload)
   if (!payload) {
-    return false
+    return null
   }
 
-  return Date.now() < payload.exp
+  return Date.now() < payload.exp ? payload : null
+}
+
+export function shouldRenewSession(payload: SessionPayload, config: AuthConfig) {
+  return payload.exp - Date.now() <= config.sessionRenewWindowSeconds * 1000
 }
