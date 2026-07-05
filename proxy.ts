@@ -7,6 +7,11 @@ const protectedPagePrefixes = ['/db', '/mail']
 export async function proxy(request: NextRequest) {
   const authConfig = getAuthConfig()
   const path = request.nextUrl.pathname
+
+  if (path.startsWith('/api/db/api/')) {
+    return NextResponse.next()
+  }
+
   const token = request.cookies.get(AUTH_COOKIE_NAME)?.value
   const isAuthorized = authConfig ? await verifySessionToken(token, authConfig.sessionSecret) : false
 

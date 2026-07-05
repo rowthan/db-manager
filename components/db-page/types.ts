@@ -124,10 +124,45 @@ export type CollectionConfig = {
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
   savedAggregations?: SavedAggregation[]
+  apiConfigs?: CollectionApiConfig[]
   indexSync?: IndexSyncSummary
   liveIndexes?: CollectionIndexInfo[]
   createdAt?: string
   updatedAt?: string
+}
+
+export type CollectionApiOperation = 'get' | 'post' | 'put' | 'delete'
+
+export type CollectionApiAuthMode = 'path-token' | 'header'
+
+export type CollectionApiConfig = {
+  id: string
+  operationId: string
+  name: string
+  enabled: boolean
+  operations: CollectionApiOperation[]
+  authMode: CollectionApiAuthMode
+  token: string
+  headerName?: string
+  expiresAt?: string
+  scopeFilterText?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export type CollectionApiCallRecord = {
+  id: string
+  database: string
+  collection: string
+  apiId: string
+  apiName: string
+  operation: CollectionApiOperation
+  ok: boolean
+  status: number
+  message: string
+  authMode: CollectionApiAuthMode
+  durationMs: number
+  createdAt: string
 }
 
 export type DocumentEditMode = 'json' | 'table'

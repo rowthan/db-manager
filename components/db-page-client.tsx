@@ -14,6 +14,14 @@ import {
   ReloadIcon,
 } from '@radix-ui/react-icons'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog'
 import type {
   MongoAggregationResult,
   MongoMeta,
@@ -46,6 +54,9 @@ import type {
   ForeignCollectionState,
   CollectionConfigCacheEntry,
   FieldValuePreviewModalState,
+  CollectionApiConfig,
+  CollectionApiOperation,
+  CollectionApiCallRecord,
 } from './db-page/types'
 
 const DEFAULT_FILTER = '{}'
@@ -65,7 +76,7 @@ type DatabasePageClientProps = {
   cloudflarePublicBaseUrl?: string
 }
 
-type WorkspaceContentTab = 'documents' | 'aggregations' | 'schema' | 'indexes' | 'validation'
+type WorkspaceContentTab = 'documents' | 'aggregations' | 'schema' | 'indexes' | 'validation' | 'api'
 type AggregationEditorMode = 'stages' | 'text'
 
 type AggregationStageDraft = {
@@ -212,10 +223,109 @@ const WORKSPACE_CONTENT_TAB_ITEMS: {
   { key: 'schema', label: '模式' },
   { key: 'indexes', label: '索引' },
   { key: 'validation', label: '验证' },
+  { key: 'api', label: 'API' },
 ]
 
 function isWorkspaceContentTab(value: unknown): value is WorkspaceContentTab {
-  return value === 'documents' || value === 'aggregations' || value === 'schema' || value === 'indexes' || value === 'validation'
+  return value === 'documents' || value === 'aggregations' || value === 'schema' || value === 'indexes' || value === 'validation' || value === 'api'
+}
+
+function createApiToken() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID().replace(/-/g, '')
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`
+}
+
+function createApiOperationId() {
+  return `op_${createApiToken().slice(0, 24)}`
+}
+
+function createDefaultCollectionApiConfig(): CollectionApiConfig {
+  const now = new Date().toISOString()
+  return {
+    id: `api_${Date.now().toString(36)}`,
+    operationId: createApiOperationId(),
+    name: '默认 API',
+    enabled: true,
+    operations: ['get', 'post', 'put', 'delete'],
+    authMode: 'path-token',
+    token: createApiToken(),
+    headerName: 'x-api-token',
+    expiresAt: '',
+    scopeFilterText: '{}',
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function buildCollectionApiEndpoint(
+  database: string,
+  collection: string,
+  apiConfig: CollectionApiConfig
+) {
+  return `/api/db/api/${encodeURIComponent(database)}/${encodeURIComponent(collection)}/${encodeURIComponent(apiConfig.operationId || apiConfig.id)}`
+}
+
+function formatApiMethodLabel(operation: CollectionApiOperation) {
+  if (operation === 'get') return 'GET'
+  if (operation === 'post') return 'POST'
+  if (operation === 'put') return 'PUT'
+  return 'DELETE'
+}
+
+function createApiDebugBodyText(operation: CollectionApiOperation) {
+  if (operation === 'get') {
+    return prettyJson({
+      filter: {},
+      pagination: {
+        page: 0,
+        pageSize: 10,
+      },
+    })
+  }
+  if (operation === 'post') {
+    return prettyJson({
+      body: {},
+    })
+  }
+  if (operation === 'put') {
+    return prettyJson({
+      filter: {
+        _id: '',
+      },
+      body: {},
+    })
+  }
+  return prettyJson({
+    filter: {
+      _id: '',
+    },
+  })
+}
+
+function extractSimpleFilterDefaults(filterText?: string) {
+  try {
+    const parsed = parseJson(filterText || '{}')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {}
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).flatMap(([key, value]) => {
+        if (key.startsWith('$')) {
+          return []
+        }
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const operators = value as Record<string, unknown>
+          return Object.prototype.hasOwnProperty.call(operators, '$eq') ? [[key, operators.$eq]] : []
+        }
+        return [[key, value]]
+      })
+    )
+  } catch {
+    return {}
+  }
 }
 
 function parseStoredWorkspaceTabs(raw: string | null): WorkspaceTab[] {
@@ -688,6 +798,40 @@ function mergeFilterDocuments(base: unknown, addition: unknown) {
 
   return {
     $and: [...baseConditions, ...additionalConditions],
+  }
+}
+
+function isCommonDateRangeCondition(condition: Record<string, unknown>) {
+  if ('$expr' in condition) {
+    const exprText = JSON.stringify(condition.$expr)
+    return exprText.includes('"$createAt"') && (exprText.includes('"$dateTrunc"') || exprText.includes('"$dateAdd"'))
+  }
+
+  const createAt = condition.createAt
+  if (!createAt || typeof createAt !== 'object' || Array.isArray(createAt)) {
+    return false
+  }
+
+  const createAtFilter = createAt as Record<string, unknown>
+  return '$gte' in createAtFilter && '$lt' in createAtFilter
+}
+
+function removeCommonDateRangeConditions(filter: unknown) {
+  const normalized = normalizeFilterDocument(filter)
+  const conditions = flattenAndConditions(normalized).filter(
+    (condition) => !isCommonDateRangeCondition(condition)
+  )
+
+  if (!conditions.length) {
+    return {}
+  }
+
+  if (conditions.length === 1) {
+    return conditions[0]
+  }
+
+  return {
+    $and: conditions,
   }
 }
 
@@ -3500,6 +3644,41 @@ function DatabasePageInner({
   const [filterTextEditorError, setFilterTextEditorError] = useState('')
   const [filterFieldSuggestionsOpenId, setFilterFieldSuggestionsOpenId] = useState<string | null>(null)
   const [collectionConfig, setCollectionConfig] = useState<CollectionConfig | null>(null)
+  const [apiCallRecords, setApiCallRecords] = useState<CollectionApiCallRecord[]>([])
+  const [loadingApiCallRecords, setLoadingApiCallRecords] = useState(false)
+  const [apiWorkspaceError, setApiWorkspaceError] = useState('')
+  const [editingApiConfigIds, setEditingApiConfigIds] = useState<string[]>([])
+  const [apiConfigDrafts, setApiConfigDrafts] = useState<Record<string, CollectionApiConfig>>({})
+  const [apiDebugger, setApiDebugger] = useState<{
+    open: boolean
+    api: CollectionApiConfig | null
+    operation: CollectionApiOperation
+    requestText: string
+    responseText: string
+    statusText: string
+    error: string
+    loading: boolean
+  }>({
+    open: false,
+    api: null,
+    operation: 'get',
+    requestText: createApiDebugBodyText('get'),
+    responseText: '',
+    statusText: '',
+    error: '',
+    loading: false,
+  })
+  const [apiScopeEditor, setApiScopeEditor] = useState<{
+    open: boolean
+    apiId: string
+    drafts: FilterConditionDraft[]
+    error: string
+  }>({
+    open: false,
+    apiId: '',
+    drafts: [createEmptyFilterConditionDraft()],
+    error: '',
+  })
   const [fieldConfigOpen, setFieldConfigOpen] = useState(false)
   const [fieldConfigSyncMessage, setFieldConfigSyncMessage] = useState('')
   const [fieldDraft, setFieldDraft] = useState<FieldSetting[]>([])
@@ -3607,6 +3786,7 @@ function DatabasePageInner({
   const lastAutoQueryKeyRef = useRef('')
   const activeWorkspaceTabIdRef = useRef('')
   const formRef = useRef<QueryForm | null>(null)
+  const suppressRouteQuerySyncRef = useRef<{ database: string; collection: string } | null>(null)
   const queryRequestSeqRef = useRef(0)
   const latestQueryRequestIdByTabRef = useRef<Record<string, number>>({})
   const aggregationRequestSeqRef = useRef(0)
@@ -3796,9 +3976,15 @@ function DatabasePageInner({
         existing.database,
         existing.collection
       )
-      const routeExistingForm = applyRouteQueryParams(boundExistingForm)
-      const shouldApplyRouteQuery = routeHasQueryParams && !formMatchesRouteQueryParams(boundExistingForm)
-      if (activeWorkspaceTabId !== existing.id || shouldApplyRouteQuery) {
+      const suppressRouteQuerySync =
+        suppressRouteQuerySyncRef.current?.database === existing.database &&
+        suppressRouteQuerySyncRef.current?.collection === existing.collection
+      const routeExistingForm = suppressRouteQuerySync
+        ? boundExistingForm
+        : applyRouteQueryParams(boundExistingForm)
+      const shouldApplyRouteQuery =
+        !suppressRouteQuerySync && routeHasQueryParams && !formMatchesRouteQueryParams(boundExistingForm)
+      if (activeWorkspaceTabId !== existing.id || shouldApplyRouteQuery || suppressRouteQuerySync) {
         lastAutoQueryKeyRef.current = ''
         setResult(existing.result)
         setQueryError(existing.queryError)
@@ -3969,6 +4155,18 @@ function DatabasePageInner({
 
     void loadAggregationCollectionTotal(database, collection)
   }, [activeWorkspaceTab?.collection, activeWorkspaceTab?.database, form.collection, form.database])
+
+  useEffect(() => {
+    const activeView = activeWorkspaceTab?.view || 'documents'
+    const database = activeWorkspaceTab?.database || form.database
+    const collection = activeWorkspaceTab?.collection || form.collection
+    if (activeView !== 'api' || !database || !collection) {
+      return
+    }
+
+    void loadApiCallRecords()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkspaceTab?.collection, activeWorkspaceTab?.database, activeWorkspaceTab?.view, form.collection, form.database])
 
   useEffect(() => {
     if (!form.database || !form.collection) {
@@ -4381,6 +4579,7 @@ function DatabasePageInner({
         fieldSettings: [],
         savedQueries: [],
         savedAggregations: [],
+        apiConfigs: [],
       }
 
       if (targetTabId) {
@@ -4411,6 +4610,7 @@ function DatabasePageInner({
     fieldSettings?: FieldSetting[]
     savedQueries?: SavedQuery[]
     savedAggregations?: SavedAggregation[]
+    apiConfigs?: CollectionApiConfig[]
     database?: string
     collection?: string
   }) {
@@ -4441,6 +4641,7 @@ function DatabasePageInner({
           fieldSettings: nextConfig.fieldSettings ?? collectionConfig?.fieldSettings ?? [],
           savedQueries: nextConfig.savedQueries ?? collectionConfig?.savedQueries ?? [],
           savedAggregations: nextConfig.savedAggregations ?? collectionConfig?.savedAggregations ?? [],
+          apiConfigs: nextConfig.apiConfigs ?? collectionConfig?.apiConfigs ?? [],
         }),
       })
       const data = (await response.json()) as CollectionConfig & { error?: string }
@@ -4461,6 +4662,49 @@ function DatabasePageInner({
       return data
     } finally {
       setSavingConfig(false)
+    }
+  }
+
+  async function loadApiCallRecords(apiId = '') {
+    const targetDatabase = activeWorkspaceTab?.database?.trim() || form.database.trim()
+    const targetCollection = activeWorkspaceTab?.collection?.trim() || form.collection.trim()
+    if (!targetDatabase || !targetCollection) {
+      return
+    }
+
+    setLoadingApiCallRecords(true)
+    setApiWorkspaceError('')
+    try {
+      const url = new URL('/api/db/api-records', window.location.origin)
+      url.searchParams.set('database', targetDatabase)
+      url.searchParams.set('collection', targetCollection)
+      url.searchParams.set('limit', '50')
+      if (apiId) {
+        url.searchParams.set('apiId', apiId)
+      }
+      const response = await fetch(url.toString())
+      const data = (await response.json()) as {
+        ok?: boolean
+        items?: CollectionApiCallRecord[]
+        error?: string
+      }
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || '读取 API 调用记录失败')
+      }
+      setApiCallRecords(data.items || [])
+    } catch (error) {
+      setApiWorkspaceError(error instanceof Error ? error.message : '读取 API 调用记录失败')
+    } finally {
+      setLoadingApiCallRecords(false)
+    }
+  }
+
+  async function saveApiConfigs(apiConfigs: CollectionApiConfig[]) {
+    setApiWorkspaceError('')
+    try {
+      await persistCollectionConfig({ apiConfigs })
+    } catch (error) {
+      setApiWorkspaceError(error instanceof Error ? error.message : '保存 API 配置失败')
     }
   }
 
@@ -5812,7 +6056,9 @@ function DatabasePageInner({
   function applyCommonPreset(filterText: string) {
     let nextFilterText = filterText
     try {
-      nextFilterText = prettyJson(mergeFilterDocuments(parseJson(form.filterText), parseJson(filterText)))
+      nextFilterText = prettyJson(
+        mergeFilterDocuments(removeCommonDateRangeConditions(parseJson(form.filterText)), parseJson(filterText))
+      )
     } catch {
       nextFilterText = filterText
     }
@@ -5822,11 +6068,17 @@ function DatabasePageInner({
       filterText: nextFilterText,
       page: 0,
     }
-    setForm(nextForm)
     if (filterBuilderOpen) {
-      setFilterBuilderCanSync(hydrateFilterBuilderFromText(nextFilterText))
+      setFilterBuilderCanSync(false)
     }
+    setForm(nextForm)
     void executeQuery(nextForm)
+  }
+
+  function applyCommonPresetFromBuilder(filterText: string) {
+    setFilterBuilderCanSync(false)
+    applyCommonPreset(filterText)
+    setFilterBuilderVisibility(false)
   }
 
   function hydrateFilterBuilderFromText(filterText: string) {
@@ -6206,15 +6458,62 @@ function DatabasePageInner({
     setAggregationStagePreviews({})
   }
 
-  function resetConditions() {
+  function clearConditions() {
+    const targetTab = workspaceTabs.find(
+      (tab) => tab.database === form.database && tab.collection === form.collection
+    )
+    const nextForm: QueryForm = {
+      ...form,
+      filterText: DEFAULT_FILTER,
+      projectionText: DEFAULT_PROJECTION,
+      sortText: DEFAULT_FILTER,
+      page: 0,
+      findOne: false,
+    }
     if (filterBuilderOpen) {
       setFilterBuilderCanSync(true)
       setFilterBuilderDrafts([createEmptyFilterConditionDraft()])
+      setFilterFieldSuggestionsOpenId(null)
     }
-    setForm((prev) => buildResetQueryForm(prev))
-    if (filterBuilderOpen) {
-      setFilterBuilderCanSync(hydrateFilterBuilderFromText(DEFAULT_FILTER))
+    suppressRouteQuerySyncRef.current = {
+      database: nextForm.database,
+      collection: nextForm.collection,
     }
+    if (targetTab || activeWorkspaceTabIdRef.current) {
+      const targetTabId = targetTab?.id || activeWorkspaceTabIdRef.current
+      setWorkspaceTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === targetTabId || (tab.database === nextForm.database && tab.collection === nextForm.collection)
+            ? {
+                ...tab,
+                form: bindFormToWorkspaceTarget(nextForm, tab.database, tab.collection),
+              }
+            : tab
+        )
+      )
+    }
+    setForm(nextForm)
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(searchParams?.toString() || '')
+      params.set('database', nextForm.database)
+      params.set('collection', nextForm.collection)
+      params.delete('filter')
+      params.delete('projection')
+      params.delete('sort')
+      params.delete('findOne')
+      params.delete('page')
+      params.delete('pageSize')
+      window.history.replaceState(window.history.state, '', `/db?${params.toString()}`)
+      window.setTimeout(() => {
+        if (
+          suppressRouteQuerySyncRef.current?.database === nextForm.database &&
+          suppressRouteQuerySyncRef.current?.collection === nextForm.collection
+        ) {
+          suppressRouteQuerySyncRef.current = null
+        }
+      }, 10000)
+    }
+    void executeQuery(nextForm, targetTab?.id || activeWorkspaceTabIdRef.current)
   }
 
   function openFieldModal() {
@@ -6996,9 +7295,13 @@ function DatabasePageInner({
                                 <button
                                   key={preset.label}
                                   className="btn btn-outline btn-xs"
+                                  onPointerDown={(e) => {
+                                    e.preventDefault()
+                                    e.stopPropagation()
+                                    applyCommonPresetFromBuilder(preset.filterText)
+                                  }}
                                   onClick={() => {
-                                    applyCommonPreset(preset.filterText)
-                                    setFilterBuilderVisibility(false)
+                                    applyCommonPresetFromBuilder(preset.filterText)
                                   }}
                                   title={preset.description}
                                   type="button"
@@ -7196,8 +7499,8 @@ function DatabasePageInner({
               </div>
 
               <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
-                <button className="btn btn-outline btn-sm" onClick={resetConditions}>
-                  重置
+                <button className="btn btn-outline btn-sm" onClick={clearConditions}>
+                  清空
                 </button>
                 <button className="btn btn-success btn-sm text-white" onClick={() => void executeQuery()}>
                   {loadingQuery ? '查询中...' : '查询'}
@@ -7610,6 +7913,870 @@ function DatabasePageInner({
           </div>
         </div>
       </section>
+    )
+  }
+
+  function renderApiWorkspace() {
+    const apiConfigs = collectionConfig?.apiConfigs || []
+    const operations: CollectionApiOperation[] = ['get', 'post', 'put', 'delete']
+    const targetDatabase = workspaceDatabase || form.database
+    const targetCollection = workspaceCollection || form.collection
+
+    function updateApiDraft(apiId: string, patch: Partial<CollectionApiConfig>) {
+      const now = new Date().toISOString()
+      setApiConfigDrafts((prev) => {
+        const current = prev[apiId] || apiConfigs.find((item) => item.id === apiId)
+        if (!current) {
+          return prev
+        }
+
+        return {
+          ...prev,
+          [apiId]: {
+            ...current,
+            ...patch,
+            updatedAt: now,
+          },
+        }
+      })
+    }
+
+    function saveApiDraft(apiId: string) {
+      const draft = apiConfigDrafts[apiId] || apiConfigs.find((item) => item.id === apiId)
+      if (!draft) {
+        setApiEditing(apiId, false)
+        return
+      }
+
+      void saveApiConfigs(
+        apiConfigs.some((item) => item.id === apiId)
+          ? apiConfigs.map((item) => (item.id === apiId ? draft : item))
+          : [draft, ...apiConfigs]
+      )
+      setApiConfigDrafts((prev) => {
+        const next = { ...prev }
+        delete next[apiId]
+        return next
+      })
+      setApiEditing(apiId, false)
+    }
+
+    function toggleOperation(api: CollectionApiConfig, operation: CollectionApiOperation) {
+      const nextOperations = api.operations.includes(operation)
+        ? api.operations.filter((item) => item !== operation)
+        : [...api.operations, operation]
+      updateApiDraft(api.id, { operations: nextOperations.length ? nextOperations : [operation] })
+    }
+
+    function setApiEditing(apiId: string, editing: boolean) {
+      if (editing) {
+        const current = apiConfigs.find((item) => item.id === apiId)
+        if (current) {
+          setApiConfigDrafts((prev) => ({
+            ...prev,
+            [apiId]: prev[apiId] || current,
+          }))
+        }
+      }
+      setEditingApiConfigIds((prev) =>
+        editing
+          ? Array.from(new Set([...prev, apiId]))
+          : prev.filter((item) => item !== apiId)
+      )
+    }
+
+    function deleteApiConfig(api: CollectionApiConfig) {
+      const confirmed = window.confirm(`删除 API「${api.name || api.id}」？`)
+      if (!confirmed) {
+        return
+      }
+      setEditingApiConfigIds((prev) => prev.filter((item) => item !== api.id))
+      setApiConfigDrafts((prev) => {
+        const next = { ...prev }
+        delete next[api.id]
+        return next
+      })
+      void saveApiConfigs(apiConfigs.filter((item) => item.id !== api.id))
+    }
+
+    function openApiScopeEditor(api: CollectionApiConfig) {
+      try {
+        const parsed = parseJson(api.scopeFilterText || '{}')
+        setApiScopeEditor({
+          open: true,
+          apiId: api.id,
+          drafts: buildFilterDraftsFromExpression(parsed),
+          error: '',
+        })
+      } catch (error) {
+        setApiScopeEditor({
+          open: true,
+          apiId: api.id,
+          drafts: [createEmptyFilterConditionDraft()],
+          error: error instanceof Error ? error.message : '当前范围条件不是有效 JSON',
+        })
+      }
+    }
+
+    function updateApiScopeEditorDraft(id: string, patch: Partial<FilterConditionDraft>) {
+      setApiScopeEditor((prev) => ({
+        ...prev,
+        drafts: prev.drafts.map((draft) =>
+          draft.id === id
+            ? {
+                ...draft,
+                ...patch,
+              }
+            : draft
+        ),
+        error: '',
+      }))
+    }
+
+    function addApiScopeEditorDraft() {
+      setApiScopeEditor((prev) => ({
+        ...prev,
+        drafts: [...prev.drafts, createEmptyFilterConditionDraft()],
+        error: '',
+      }))
+    }
+
+    function removeApiScopeEditorDraft(id: string) {
+      setApiScopeEditor((prev) => ({
+        ...prev,
+        drafts: prev.drafts.filter((draft) => draft.id !== id).length
+          ? prev.drafts.filter((draft) => draft.id !== id)
+          : [createEmptyFilterConditionDraft()],
+        error: '',
+      }))
+    }
+
+    function applyApiScopeEditor() {
+      try {
+        const filter = buildFilterExpressionFromDrafts(apiScopeEditor.drafts)
+        updateApiDraft(apiScopeEditor.apiId, { scopeFilterText: prettyJson(filter) })
+        setApiScopeEditor({
+          open: false,
+          apiId: '',
+          drafts: [createEmptyFilterConditionDraft()],
+          error: '',
+        })
+      } catch (error) {
+        setApiScopeEditor((prev) => ({
+          ...prev,
+          error: error instanceof Error ? error.message : '生成范围条件失败',
+        }))
+      }
+    }
+
+    function openApiDebugger(api: CollectionApiConfig, operation: CollectionApiOperation) {
+      const requestText = operation === 'post'
+        ? prettyJson({
+            body: extractSimpleFilterDefaults(api.scopeFilterText),
+          })
+        : createApiDebugBodyText(operation)
+      setApiDebugger({
+        open: true,
+        api,
+        operation,
+        requestText,
+        responseText: '',
+        statusText: '',
+        error: '',
+        loading: false,
+      })
+    }
+
+    function buildApiDebugRequest(api: CollectionApiConfig, operation: CollectionApiOperation) {
+      const endpoint = buildCollectionApiEndpoint(targetDatabase, targetCollection, api)
+      const headers: Record<string, string> = {}
+      const parsedRequest = parseJson(apiDebugger.requestText || '{}')
+      if (!parsedRequest || typeof parsedRequest !== 'object' || Array.isArray(parsedRequest)) {
+        throw new Error(operation === 'get' ? '查询参数必须是 JSON 对象' : '请求体必须是 JSON 对象')
+      }
+
+      if (api.authMode === 'header') {
+        headers[api.headerName || 'x-api-token'] = api.token
+      }
+
+      if (operation === 'get') {
+        const url = new URL(endpoint, window.location.origin)
+        Object.entries(parsedRequest as Record<string, unknown>).forEach(([key, value]) => {
+          if (value === undefined || value === '') {
+            return
+          }
+          url.searchParams.set(
+            key,
+            value && typeof value === 'object' ? JSON.stringify(value) : String(value)
+          )
+        })
+        return {
+          url: url.toString(),
+          init: {
+            method: formatApiMethodLabel(operation),
+            headers,
+          } satisfies RequestInit,
+        }
+      }
+
+      headers['content-type'] = 'application/json'
+      return {
+        url: endpoint,
+        init: {
+          method: formatApiMethodLabel(operation),
+          headers,
+          body: JSON.stringify(parsedRequest),
+        } satisfies RequestInit,
+      }
+    }
+
+    async function executeApiDebugRequest() {
+      const api = apiDebugger.api
+      if (!api) {
+        return
+      }
+
+      setApiDebugger((prev) => ({
+        ...prev,
+        loading: true,
+        error: '',
+        responseText: '',
+        statusText: '',
+      }))
+
+      try {
+        const { url, init } = buildApiDebugRequest(api, apiDebugger.operation)
+        const response = await fetch(url, init)
+        const text = await response.text()
+        let responseText = text
+        try {
+          responseText = prettyJson(JSON.parse(text))
+        } catch {
+          responseText = text
+        }
+        setApiDebugger((prev) => ({
+          ...prev,
+          open: true,
+          loading: false,
+          statusText: `${response.status} ${response.statusText}`,
+          responseText,
+        }))
+        void loadApiCallRecords(api.id)
+      } catch (error) {
+        setApiDebugger((prev) => ({
+          ...prev,
+          open: true,
+          loading: false,
+          error: error instanceof Error ? error.message : '请求失败',
+        }))
+      }
+    }
+
+    return (
+      <>
+      <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.85fr)_minmax(0,1.15fr)]">
+        <section className="rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-base-content/60">API</h3>
+              <div className="mt-1 text-sm text-base-content/55">
+                为当前集合生成读写接口，写入会经过验证规则。
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => {
+                const nextApi = createDefaultCollectionApiConfig()
+                setApiConfigDrafts((prev) => ({
+                  ...prev,
+                  [nextApi.id]: nextApi,
+                }))
+                setApiEditing(nextApi.id, true)
+                void saveApiConfigs([nextApi, ...apiConfigs])
+              }}
+              disabled={savingConfig || !targetDatabase || !targetCollection}
+            >
+              新建 API
+            </button>
+          </div>
+
+          {apiWorkspaceError ? (
+            <div className="alert alert-error mt-4 py-2 text-sm">{apiWorkspaceError}</div>
+          ) : null}
+
+          <div className="mt-4 space-y-3">
+            {apiConfigs.length ? (
+              apiConfigs.map((api) => {
+                const editing = editingApiConfigIds.includes(api.id)
+                const editApi = apiConfigDrafts[api.id] || api
+                const authLabel = api.authMode === 'header'
+                  ? `Header · ${api.headerName || 'x-api-token'}`
+                  : 'URL 访问'
+                const expiresLabel = api.expiresAt
+                  ? `有效期至 ${new Date(api.expiresAt).toLocaleString()}`
+                  : '长期有效'
+                const scopeFilterText = api.scopeFilterText?.trim() || '{}'
+
+                return (
+                  <div key={api.id} className="rounded-xl border border-base-300 bg-base-100 p-4">
+                    {!editing ? (
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="truncate text-base font-semibold">{api.name || api.id}</div>
+                              <span className={`badge badge-sm ${api.enabled ? 'badge-success' : 'badge-ghost'}`}>
+                                {api.enabled ? '已启用' : '已停用'}
+                              </span>
+                            </div>
+                            <div className="mt-1 text-xs text-base-content/55">
+                              {authLabel} · {expiresLabel}
+                            </div>
+                            <div className="mt-1 max-w-full truncate font-mono text-xs text-base-content/50" title={scopeFilterText}>
+                              范围：{scopeFilterText === '{}' ? '全部文档' : scopeFilterText}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm"
+                            onClick={() => setApiEditing(api.id, true)}
+                          >
+                            编辑
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {operations.map((operation) => {
+                            const operationEnabled = api.operations.includes(operation)
+                            return (
+                              <button
+                                key={operation}
+                                type="button"
+                                className={`badge badge-sm cursor-pointer font-mono uppercase ${
+                                  operationEnabled
+                                    ? 'badge-outline hover:bg-base-200'
+                                    : 'border-dashed border-base-300 bg-base-200/40 text-base-content/35 hover:text-base-content/60'
+                                }`}
+                                title={operationEnabled ? '已开启，点击调试' : '未开启，点击调试'}
+                                onClick={() => openApiDebugger(api, operation)}
+                              >
+                                {formatApiMethodLabel(operation)}
+                              </button>
+                            )
+                          })}
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-base-300 bg-base-50 px-3 py-2">
+                          <div className="text-[11px] font-semibold uppercase text-base-content/45">URL</div>
+                          <div className="break-all font-mono text-xs text-base-content/75">
+                            {buildCollectionApiEndpoint(targetDatabase, targetCollection, api)}
+                          </div>
+                          <div className="flex flex-wrap gap-2 text-xs text-base-content/55">
+                            {operations.map((operation) => {
+                              const operationEnabled = api.operations.includes(operation)
+                              return (
+                                <button
+                                  key={operation}
+                                  type="button"
+                                  className={`font-mono uppercase ${
+                                    operationEnabled
+                                      ? 'hover:text-primary'
+                                      : 'text-base-content/35 line-through decoration-base-content/30 hover:text-base-content/60'
+                                  }`}
+                                  title={operationEnabled ? '已开启，点击调试' : '未开启，点击调试'}
+                                  onClick={() => openApiDebugger(api, operation)}
+                                >
+                                  {formatApiMethodLabel(operation)}
+                                </button>
+                              )
+                            })}
+                          </div>
+                          {api.authMode === 'header' ? (
+                            <div className="text-xs text-base-content/50">
+                              Header: <span className="font-mono">{api.headerName || 'x-api-token'}: {api.token}</span>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between gap-3">
+                          <label className="form-control min-w-0 flex-1">
+                            <span className="label-text text-xs">API 名称</span>
+                            <input
+                              className="input input-bordered input-sm compass-input"
+                              value={editApi.name}
+                              onChange={(e) => updateApiDraft(api.id, { name: e.target.value })}
+                            />
+                          </label>
+                          <label className="mt-7 flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="toggle toggle-success toggle-sm"
+                              checked={editApi.enabled}
+                              onChange={(e) => updateApiDraft(api.id, { enabled: e.target.checked })}
+                            />
+                            启用
+                          </label>
+                        </div>
+
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          <label className="form-control">
+                            <span className="label-text text-xs">鉴权方式</span>
+                            <select
+                              className="select select-bordered select-sm compass-input"
+                              value={editApi.authMode}
+                              onChange={(e) =>
+                                updateApiDraft(api.id, {
+                                  authMode: e.target.value === 'header' ? 'header' : 'path-token',
+                                })
+                              }
+                            >
+                              <option value="path-token">URL 访问</option>
+                              <option value="header">Header token</option>
+                            </select>
+                          </label>
+                          <label className="form-control">
+                            <span className="label-text text-xs">Header 名称</span>
+                            <input
+                              className="input input-bordered input-sm compass-input font-mono"
+                              value={editApi.headerName || 'x-api-token'}
+                              onChange={(e) => updateApiDraft(api.id, { headerName: e.target.value })}
+                              disabled={editApi.authMode !== 'header'}
+                            />
+                          </label>
+                        </div>
+
+                        <label className="form-control mt-3">
+                          <span className="label-text text-xs">operation_id</span>
+                          <input
+                            className="input input-bordered input-sm compass-input font-mono"
+                            value={editApi.operationId || editApi.id}
+                            readOnly
+                          />
+                          <span className="mt-1 text-xs text-base-content/45">
+                            自动生成，作为公开 API URL 的唯一标识，不可修改。
+                          </span>
+                        </label>
+
+                        {editApi.authMode === 'header' ? (
+                        <label className="form-control mt-3">
+                          <span className="label-text text-xs">Header Token</span>
+                          <div className="flex w-full items-stretch">
+                            <input
+                              className="input input-bordered input-sm compass-input min-w-0 flex-1 rounded-r-none font-mono"
+                              value={editApi.token}
+                              onChange={(e) => updateApiDraft(api.id, { token: e.target.value })}
+                            />
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm shrink-0 rounded-l-none whitespace-nowrap"
+                              onClick={() => updateApiDraft(api.id, { token: createApiToken() })}
+                            >
+                              重置
+                            </button>
+                          </div>
+                        </label>
+                        ) : (
+                          <div className="mt-3 rounded-lg border border-base-300 bg-base-50 px-3 py-2 text-xs text-base-content/55">
+                            URL 访问模式不再配置额外 token；任何人拿到完整 URL 都可以按开放方法调用。
+                          </div>
+                        )}
+
+                        <label className="form-control mt-3">
+                          <span className="label-text text-xs">有效期</span>
+                          <input
+                            className="input input-bordered input-sm compass-input"
+                            type="datetime-local"
+                            value={editApi.expiresAt ? toDateTimeLocalValue(editApi.expiresAt) : ''}
+                            onChange={(e) =>
+                              updateApiDraft(api.id, {
+                                expiresAt: e.target.value ? fromDateTimeLocalValue(e.target.value) : '',
+                              })
+                            }
+                          />
+                        </label>
+
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {operations.map((operation) => (
+                            <label key={operation} className="btn btn-outline btn-xs gap-2">
+                              <input
+                                type="checkbox"
+                                className="checkbox checkbox-xs"
+                                checked={editApi.operations.includes(operation)}
+                                onChange={() => toggleOperation(editApi, operation)}
+                              />
+                              {operation}
+                            </label>
+                          ))}
+                        </div>
+
+                        <label className="form-control mt-3">
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="label-text text-xs">数据范围限制</span>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-xs"
+                              onClick={() => openApiScopeEditor(editApi)}
+                            >
+                              交互编辑
+                            </button>
+                          </span>
+                          <textarea
+                            className="textarea textarea-bordered compass-input min-h-[88px] font-mono text-xs"
+                            value={editApi.scopeFilterText || '{}'}
+                            onChange={(e) => updateApiDraft(api.id, { scopeFilterText: e.target.value })}
+                            placeholder={'例如：{ "_id": "xxxx" }'}
+                            spellCheck={false}
+                          />
+                          <span className="mt-1 text-xs text-base-content/45">
+                            所有 API 操作会自动叠加此 Mongo 查询条件；留空或 {} 表示全部文档。
+                          </span>
+                        </label>
+
+                        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-base-300 pt-3">
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm text-error"
+                            onClick={() => deleteApiConfig(api)}
+                          >
+                            删除
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            onClick={() => saveApiDraft(api.id)}
+                          >
+                            完成
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )
+              })
+            ) : (
+              <div className="rounded-xl border border-dashed border-base-300 px-4 py-8 text-center text-sm text-base-content/50">
+                当前集合还没有 API 配置。
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-base-content/60">调用记录</h3>
+              <div className="mt-1 text-sm text-base-content/55">
+                记录当前集合 API 的最近调用情况。
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => void loadApiCallRecords()}
+              disabled={loadingApiCallRecords || !targetDatabase || !targetCollection}
+            >
+              {loadingApiCallRecords ? '刷新中...' : '刷新记录'}
+            </button>
+          </div>
+
+          <div className="mt-4 overflow-auto rounded-xl border border-base-300">
+            <table className="table table-zebra">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>API</th>
+                  <th>操作</th>
+                  <th>状态</th>
+                  <th>耗时</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apiCallRecords.length ? (
+                  apiCallRecords.map((record) => (
+                    <tr key={record.id}>
+                      <td className="text-xs">{record.createdAt ? new Date(record.createdAt).toLocaleString() : '-'}</td>
+                      <td className="text-sm">{record.apiName || record.apiId}</td>
+                      <td className="font-mono text-xs">{record.operation}</td>
+                      <td>
+                        <span className={`badge badge-sm ${record.ok ? 'badge-success' : 'badge-error'}`}>
+                          {record.status}
+                        </span>
+                        {record.message && record.message !== 'OK' ? (
+                          <div className="mt-1 max-w-[18rem] truncate text-xs text-base-content/55" title={record.message}>
+                            {record.message}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="text-xs">{record.durationMs} ms</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="py-10 text-center text-sm text-base-content/50">
+                      暂无调用记录。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+      <Dialog
+        open={apiDebugger.open}
+        onOpenChange={(open) =>
+          setApiDebugger((prev) => (prev.loading && !open ? prev : {
+            ...prev,
+            open,
+          }))
+        }
+      >
+        <DialogContent
+          className="max-h-[88vh] max-w-4xl overflow-y-auto"
+          onInteractOutside={(event) => {
+            if (apiDebugger.loading) {
+              event.preventDefault()
+            }
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>调试 API</DialogTitle>
+            <DialogDescription>
+              {apiDebugger.api?.name || apiDebugger.api?.id || 'API'} · {formatApiMethodLabel(apiDebugger.operation)}
+            </DialogDescription>
+          </DialogHeader>
+
+          {apiDebugger.api ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-base-300 bg-base-50 px-3 py-2">
+                <div className="text-[11px] font-semibold uppercase text-base-content/45">URL</div>
+                <div className="mt-1 break-all font-mono text-xs text-base-content/75">
+                  {buildCollectionApiEndpoint(targetDatabase, targetCollection, apiDebugger.api)}
+                </div>
+                {apiDebugger.api.authMode === 'header' ? (
+                  <div className="mt-2 text-xs text-base-content/50">
+                    Header: <span className="font-mono">{apiDebugger.api.headerName || 'x-api-token'}</span>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {operations.map((operation) => {
+                  const operationEnabled = apiDebugger.api?.operations.includes(operation)
+                  return (
+                    <button
+                      key={operation}
+                      type="button"
+                      className={`btn btn-xs ${
+                        apiDebugger.operation === operation
+                          ? 'btn-primary'
+                          : operationEnabled
+                            ? 'btn-outline'
+                            : 'btn-outline border-dashed opacity-55'
+                      }`}
+                      title={operationEnabled ? '已开启' : '未开启'}
+                      onClick={() =>
+                        setApiDebugger((prev) => ({
+                          ...prev,
+                          operation,
+                          requestText: operation === 'post'
+                            ? prettyJson({
+                                body: extractSimpleFilterDefaults(prev.api?.scopeFilterText),
+                              })
+                            : createApiDebugBodyText(operation),
+                          responseText: '',
+                          statusText: '',
+                          error: '',
+                        }))
+                      }
+                    >
+                      {formatApiMethodLabel(operation)}
+                    </button>
+                  )
+                })}
+              </div>
+
+              <label className="form-control">
+                <span className="label-text text-xs">
+                  请求 JSON
+                </span>
+                <textarea
+                  className="textarea textarea-bordered compass-input min-h-[150px] font-mono text-xs"
+                  value={apiDebugger.requestText}
+                  onChange={(e) =>
+                    setApiDebugger((prev) => ({
+                      ...prev,
+                      requestText: e.target.value,
+                      error: '',
+                    }))
+                  }
+                  spellCheck={false}
+                />
+              </label>
+
+              {apiDebugger.error ? (
+                <div className="alert alert-error py-2 text-sm">{apiDebugger.error}</div>
+              ) : null}
+
+              <div className="rounded-xl border border-base-300 bg-base-50">
+                <div className="flex items-center justify-between gap-3 border-b border-base-300 px-3 py-2">
+                  <div className="text-xs font-semibold text-base-content/60">响应结果</div>
+                  {apiDebugger.statusText ? (
+                    <span className="badge badge-outline badge-sm font-mono">{apiDebugger.statusText}</span>
+                  ) : null}
+                </div>
+                <pre className="min-h-[140px] max-h-[240px] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-xs text-base-content/75">
+                  {apiDebugger.responseText || '暂无响应。'}
+                </pre>
+              </div>
+            </div>
+          ) : null}
+
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() =>
+                setApiDebugger((prev) => ({
+                  ...prev,
+                  open: false,
+                }))
+              }
+            >
+              关闭
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => void executeApiDebugRequest()}
+              disabled={apiDebugger.loading || !apiDebugger.api}
+            >
+              {apiDebugger.loading ? '请求中...' : '请求'}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={apiScopeEditor.open}
+        onOpenChange={(open) =>
+          setApiScopeEditor((prev) => ({
+            ...prev,
+            open,
+          }))
+        }
+      >
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>编辑数据范围限制</DialogTitle>
+            <DialogDescription>
+              选择字段和条件后生成 Mongo 查询条件，应用后会写回当前 API 的范围配置。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[60vh] space-y-3 overflow-auto pr-1">
+            {apiScopeEditor.drafts.map((draft) => (
+              <div
+                key={draft.id}
+                className="grid gap-2 rounded-xl border border-base-300 bg-base-100 p-3 md:grid-cols-[minmax(0,1fr)_150px_minmax(0,1fr)_auto]"
+              >
+                <label className="form-control">
+                  <span className="label-text text-xs">字段</span>
+                  <select
+                    className="select select-bordered select-sm compass-input font-mono"
+                    value={draft.field}
+                    onChange={(e) => updateApiScopeEditorDraft(draft.id, { field: e.target.value })}
+                  >
+                    <option value="">选择字段</option>
+                    {schemaFieldKeys.map((field) => (
+                      <option key={field} value={field}>
+                        {field}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text text-xs">条件</span>
+                  <select
+                    className="select select-bordered select-sm compass-input"
+                    value={draft.operator}
+                    onChange={(e) =>
+                      updateApiScopeEditorDraft(draft.id, {
+                        operator: e.target.value as FilterConditionOperator,
+                      })
+                    }
+                  >
+                    {FILTER_OPERATOR_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text text-xs">
+                    内容
+                    {draft.operator === 'exists' || draft.operator === 'notExists' ? '（无需填写）' : ''}
+                  </span>
+                  <input
+                    className="input input-bordered input-sm compass-input font-mono"
+                    value={draft.valueText}
+                    disabled={draft.operator === 'exists' || draft.operator === 'notExists'}
+                    onChange={(e) => updateApiScopeEditorDraft(draft.id, { valueText: e.target.value })}
+                    placeholder={
+                      draft.operator === 'in' || draft.operator === 'nin'
+                        ? 'JSON 数组或逗号分隔'
+                        : '输入字段值'
+                    }
+                  />
+                </label>
+
+                <div className="flex items-end justify-end">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-xs"
+                    onClick={() => removeApiScopeEditorDraft(draft.id)}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {apiScopeEditor.error ? (
+              <div className="alert alert-error py-2 text-sm">{apiScopeEditor.error}</div>
+            ) : null}
+          </div>
+
+          <DialogFooter className="gap-2 sm:justify-between sm:space-x-0">
+            <button type="button" className="btn btn-outline btn-sm" onClick={addApiScopeEditorDraft}>
+              添加条件
+            </button>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() =>
+                  setApiScopeEditor({
+                    open: false,
+                    apiId: '',
+                    drafts: [createEmptyFilterConditionDraft()],
+                    error: '',
+                  })
+                }
+              >
+                取消
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={applyApiScopeEditor}>
+                应用
+              </button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      </>
     )
   }
 
@@ -8077,6 +9244,8 @@ function DatabasePageInner({
         return renderIndexesWorkspace()
       case 'validation':
         return renderValidationWorkspace()
+      case 'api':
+        return renderApiWorkspace()
       case 'documents':
       default:
         return renderDocumentsWorkspace()
@@ -8932,9 +10101,9 @@ function DatabasePageInner({
                 </button>
                 <button
                   className="btn btn-outline btn-sm min-h-8 h-8 w-full sm:w-auto"
-                  onClick={resetConditions}
+                  onClick={clearConditions}
                 >
-                  重置条件
+                  清空条件
                 </button>
               </div>
 

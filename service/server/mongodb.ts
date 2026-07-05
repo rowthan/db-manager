@@ -69,12 +69,23 @@ type DocumentMutationInput = {
   _id: unknown
   document?: unknown
   unsetFields?: unknown
+  scopeFilter?: unknown
+}
+
+type DocumentFilterMutationInput = {
+  database?: string
+  collection: string
+  filter?: unknown
+  document?: unknown
+  unsetFields?: unknown
+  scopeFilter?: unknown
 }
 
 type DocumentInsertInput = {
   database?: string
   collection: string
   document?: unknown
+  scopeFilter?: unknown
 }
 
 type CollectionCreateInput = {
@@ -138,6 +149,40 @@ type SavedAggregation = {
   favorite?: boolean
 }
 
+type CollectionApiOperation = 'get' | 'post' | 'put' | 'delete'
+
+type CollectionApiAuthMode = 'path-token' | 'header'
+
+type CollectionApiConfig = {
+  id: string
+  operationId: string
+  name: string
+  enabled: boolean
+  operations: CollectionApiOperation[]
+  authMode: CollectionApiAuthMode
+  token: string
+  headerName?: string
+  expiresAt?: string
+  scopeFilterText?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+type CollectionApiCallRecord = {
+  id: string
+  database: string
+  collection: string
+  apiId: string
+  apiName: string
+  operation: CollectionApiOperation
+  ok: boolean
+  status: number
+  message: string
+  authMode: CollectionApiAuthMode
+  durationMs: number
+  createdAt: string
+}
+
 type SavedSyntaxRecord = {
   database: string
   collection: string
@@ -185,6 +230,7 @@ type CollectionConfig = {
   fieldSettings: FieldSetting[]
   savedQueries: SavedQuery[]
   savedAggregations: SavedAggregation[]
+  apiConfigs: CollectionApiConfig[]
   foreignRelations?: ForeignKeyRelation[]
   indexSync?: IndexSyncSummary
   liveIndexes?: CollectionIndexInfo[]
@@ -198,6 +244,7 @@ type CollectionConfigInput = {
   fieldSettings?: FieldSetting[]
   savedQueries?: SavedQuery[]
   savedAggregations?: SavedAggregation[]
+  apiConfigs?: CollectionApiConfig[]
 }
 
 type DashboardWidgetConfig = {
@@ -316,6 +363,7 @@ let cachedClient: Promise<MongoClient> | null = null
 const CONFIG_COLLECTION = '_collection_config'
 const QUERY_COLLECTION = '_queries'
 const PUBLISH_RECORDS_COLLECTION = '_publish_records'
+const API_CALL_RECORDS_COLLECTION = '_api_call_records'
 
 function readConfig(): MongoConfig {
   const uri = process.env.MONGODB_URI || process.env.MONGO_URL || ''
@@ -688,6 +736,114 @@ function normalizeQuery(value: unknown) {
   return ensurePlainObject(parsed)
 }
 
+function normalizeApiFilter(value: unknown) {
+  const filter = normalizeQuery(value)
+  if (Object.prototype.hasOwnProperty.call(filter, '_id')) {
+    filter._id = parseMongoId(filter._id)
+  }
+  return filter
+}
+
+function combineMongoFilters(...filters: Record<string, unknown>[]) {
+  const activeFilters = filters.filter((filter) => Object.keys(filter).length)
+  if (!activeFilters.length) {
+    return {}
+  }
+  if (activeFilters.length === 1) {
+    return activeFilters[0]
+  }
+  return {
+    $and: activeFilters,
+  }
+}
+
+function valuesEqualForScope(left: unknown, right: unknown) {
+  const normalizedLeft = left instanceof ObjectId ? left.toHexString() : left
+  const normalizedRight = right instanceof ObjectId ? right.toHexString() : right
+  return JSON.stringify(serializeValue(normalizedLeft)) === JSON.stringify(serializeValue(normalizedRight))
+}
+
+function documentMatchesSimpleScope(document: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+  for (const [key, expected] of Object.entries(filter)) {
+    if (key === '$and' && Array.isArray(expected)) {
+      if (!expected.every((item) => documentMatchesSimpleScope(document, ensurePlainObject(item)))) {
+        return false
+      }
+      continue
+    }
+
+    if (key === '$or' && Array.isArray(expected)) {
+      if (!expected.some((item) => documentMatchesSimpleScope(document, ensurePlainObject(item)))) {
+        return false
+      }
+      continue
+    }
+
+    const actual = getNestedValue(document, key)
+    if (expected && typeof expected === 'object' && !Array.isArray(expected) && !(expected instanceof Date) && !(expected instanceof ObjectId)) {
+      const operators = expected as Record<string, unknown>
+      if (Object.prototype.hasOwnProperty.call(operators, '$eq') && !valuesEqualForScope(actual, operators.$eq)) {
+        return false
+      }
+      if (Object.prototype.hasOwnProperty.call(operators, '$ne') && valuesEqualForScope(actual, operators.$ne)) {
+        return false
+      }
+      if (Object.prototype.hasOwnProperty.call(operators, '$in')) {
+        const values = Array.isArray(operators.$in) ? operators.$in : []
+        if (!values.some((item) => valuesEqualForScope(actual, item))) {
+          return false
+        }
+      }
+      continue
+    }
+
+    if (!valuesEqualForScope(actual, expected)) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function setNestedValue(target: Record<string, unknown>, path: string, value: unknown) {
+  const keys = path.split('.').filter(Boolean)
+  if (!keys.length) {
+    return
+  }
+
+  let cursor = target
+  keys.slice(0, -1).forEach((key) => {
+    const next = cursor[key]
+    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+      cursor[key] = {}
+    }
+    cursor = cursor[key] as Record<string, unknown>
+  })
+  cursor[keys[keys.length - 1]] = value
+}
+
+function mergeSimpleScopeIntoDocument(document: Record<string, unknown>, filter: Record<string, unknown>) {
+  const output = { ...document }
+
+  for (const [key, expected] of Object.entries(filter)) {
+    if (key.startsWith('$')) {
+      continue
+    }
+
+    if (expected && typeof expected === 'object' && !Array.isArray(expected) && !(expected instanceof Date) && !(expected instanceof ObjectId)) {
+      const operators = expected as Record<string, unknown>
+      if (Object.prototype.hasOwnProperty.call(operators, '$eq')) {
+        setNestedValue(output, key, operators.$eq)
+      }
+      continue
+    }
+
+    setNestedValue(output, key, expected)
+  }
+
+  return output
+}
+
 function normalizePipeline(value: unknown) {
   const parsed = normalizeInput(value)
   if (!Array.isArray(parsed)) {
@@ -816,6 +972,113 @@ function normalizeUnsetFields(value: unknown) {
   )
 }
 
+function getNestedValue(input: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((acc, key) => {
+    if (!acc || typeof acc !== 'object') {
+      return undefined
+    }
+    return (acc as Record<string, unknown>)[key]
+  }, input)
+}
+
+function getSettingDataType(setting: FieldSetting, value: unknown) {
+  if (Array.isArray(value)) return 'array'
+  if (value instanceof Date) return 'date'
+  if (value === null) return 'null'
+  if (typeof value === 'object') return 'object'
+  if (typeof value === 'number') return 'number'
+  if (typeof value === 'boolean') return 'boolean'
+  return 'string'
+}
+
+function getAllowedFieldDataTypes(setting: FieldSetting) {
+  const dataTypes = setting.dataTypes?.length ? setting.dataTypes : setting.dataType ? [setting.dataType] : []
+  return dataTypes.filter(Boolean)
+}
+
+function validateValueWithFieldSetting(setting: FieldSetting, value: unknown, fieldPath = setting.key): string {
+  if (setting.required === true && (value === undefined || value === null || value === '')) {
+    return `字段 ${fieldPath} 为必填项`
+  }
+
+  if (value === undefined || value === null || value === '') {
+    return ''
+  }
+
+  const type = getSettingDataType(setting, value)
+  const allowedTypes = getAllowedFieldDataTypes(setting)
+  const dateLike =
+    allowedTypes.includes('date') &&
+    (typeof value === 'string' || value instanceof Date) &&
+    !Number.isNaN(new Date(String(value)).getTime())
+  if (dateLike) {
+    return ''
+  }
+  if (allowedTypes.length && !allowedTypes.includes(type)) {
+    return `字段 ${fieldPath} 类型必须是 ${allowedTypes.join('、')}`
+  }
+  if (type === 'number' && (typeof value !== 'number' || Number.isNaN(value))) {
+    return `字段 ${fieldPath} 必须是数字`
+  }
+  if (type === 'boolean' && typeof value !== 'boolean') {
+    return `字段 ${fieldPath} 必须是布尔值`
+  }
+  if (type === 'date' && Number.isNaN(new Date(String(value)).getTime())) {
+    return `字段 ${fieldPath} 必须是有效日期`
+  }
+  if (type === 'object' && (!value || typeof value !== 'object' || Array.isArray(value))) {
+    return `字段 ${fieldPath} 必须是对象`
+  }
+  if (type === 'array' && !Array.isArray(value)) {
+    return `字段 ${fieldPath} 必须是数组`
+  }
+
+  if (setting.enumOptions?.length) {
+    const allowed = new Set(setting.enumOptions.map((item) => item.value))
+    if (!allowed.has(String(value))) {
+      return `字段 ${fieldPath} 不在允许的枚举范围内`
+    }
+  }
+
+  if (type === 'object' && setting.children?.length) {
+    for (const child of setting.children) {
+      const error = validateValueWithFieldSetting(
+        child,
+        (value as Record<string, unknown>)[child.key],
+        `${fieldPath}.${child.key}`
+      )
+      if (error) return error
+    }
+  }
+
+  if (type === 'array' && setting.children?.length) {
+    for (const [index, item] of (value as unknown[]).entries()) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return `字段 ${fieldPath} 的第 ${index + 1} 项必须是对象`
+      }
+      for (const child of setting.children) {
+        const error = validateValueWithFieldSetting(
+          child,
+          (item as Record<string, unknown>)[child.key],
+          `${fieldPath}[${index}].${child.key}`
+        )
+        if (error) return error
+      }
+    }
+  }
+
+  return ''
+}
+
+function validateDocumentWithFieldSettings(document: Record<string, unknown>, fieldSettings: FieldSetting[]) {
+  for (const setting of fieldSettings) {
+    const error = validateValueWithFieldSetting(setting, getNestedValue(document, setting.key), setting.key)
+    if (error) {
+      throw new Error(error)
+    }
+  }
+}
+
 function extractFieldsFromDocument(doc?: Record<string, unknown> | null) {
   if (!doc || typeof doc !== 'object') {
     return []
@@ -937,6 +1200,69 @@ function normalizeEnumOptions(input: unknown) {
     output.push({
       value,
       label: label || value,
+    })
+  }
+
+  return output
+}
+
+function normalizeCollectionApiOperation(input: unknown): CollectionApiOperation | null {
+  const value = String(input || '').trim()
+  if (value === 'get' || value === 'query') return 'get'
+  if (value === 'post') return 'post'
+  if (value === 'put' || value === 'patch' || value === 'update') return 'put'
+  if (value === 'delete') return 'delete'
+  return null
+}
+
+function normalizeCollectionApiConfigs(input: unknown): CollectionApiConfig[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  const seen = new Set<string>()
+  const output: CollectionApiConfig[] = []
+
+  for (const item of input) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+
+    const record = item as Record<string, unknown>
+    const id = String(record.id || '').trim()
+    if (!id || seen.has(id)) {
+      continue
+    }
+
+    const operations = Array.from(
+      new Set(
+        (Array.isArray(record.operations) ? record.operations : [])
+          .map(normalizeCollectionApiOperation)
+          .filter((operation): operation is CollectionApiOperation => Boolean(operation))
+      )
+    )
+
+    const authMode: CollectionApiAuthMode = record.authMode === 'header' ? 'header' : 'path-token'
+    const headerName = String(record.headerName || 'x-api-token').trim().toLowerCase()
+    const token = String(record.token || '').trim()
+    const rawOperationId = String(record.operationId || id).trim()
+    const operationId = rawOperationId && rawOperationId !== token ? rawOperationId : id
+    const scopeFilterText = String(record.scopeFilterText || '{}').trim() || '{}'
+
+    seen.add(id)
+    output.push({
+      id,
+      operationId,
+      name: String(record.name || id).trim() || id,
+      enabled: record.enabled !== false,
+      operations: operations.length ? operations : ['get'],
+      authMode,
+      token,
+      headerName: headerName || 'x-api-token',
+      expiresAt: typeof record.expiresAt === 'string' ? record.expiresAt.trim() || undefined : undefined,
+      scopeFilterText,
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
     })
   }
 
@@ -1634,6 +1960,7 @@ function normalizeCollectionConfig(doc: unknown): CollectionConfig | null {
     fieldSettings: normalizeFieldSettings(record.fieldSettings),
     savedQueries: normalizeSavedQueries(record.savedQueries),
     savedAggregations: normalizeSavedAggregations(record.savedAggregations),
+    apiConfigs: normalizeCollectionApiConfigs(record.apiConfigs),
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
   }
@@ -1770,6 +2097,7 @@ function createEmptyCollectionConfig(database: string, collection: string): Coll
     fieldSettings: [],
     savedQueries: [],
     savedAggregations: [],
+    apiConfigs: [],
   }
 }
 
@@ -1967,6 +2295,297 @@ async function getPublishRecordCollection(db: Db) {
   return db.collection(PUBLISH_RECORDS_COLLECTION)
 }
 
+async function getApiCallRecordCollection(db: Db) {
+  return db.collection(API_CALL_RECORDS_COLLECTION)
+}
+
+function normalizeApiOperation(value: unknown): CollectionApiOperation {
+  const operation = normalizeCollectionApiOperation(value)
+  if (!operation) {
+    throw new Error('不支持的 API 操作')
+  }
+  return operation
+}
+
+function assertCollectionApiAuth(
+  apiConfig: CollectionApiConfig,
+  input: { operationId?: string; headers?: Headers }
+) {
+  if (!input.operationId || (input.operationId !== apiConfig.operationId && input.operationId !== apiConfig.id)) {
+    throw new Error('API 地址无效')
+  }
+
+  if (apiConfig.expiresAt) {
+    const expiresAt = new Date(apiConfig.expiresAt)
+    if (!Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() < Date.now()) {
+      throw new Error('API token 已过期')
+    }
+  }
+
+  if (apiConfig.authMode === 'header') {
+    if (!apiConfig.token) {
+      throw new Error('API token 未配置')
+    }
+    const headerName = apiConfig.headerName || 'x-api-token'
+    const headerToken = input.headers?.get(headerName) || ''
+    if (headerToken !== apiConfig.token) {
+      throw new Error('API 鉴权失败')
+    }
+    return
+  }
+}
+
+function getCollectionApiPayloadFilter(payload: Record<string, unknown>) {
+  return normalizeApiFilter(payload.filter)
+}
+
+function getCollectionApiPayloadPagination(payload: Record<string, unknown>) {
+  return normalizeQuery(payload.pagination)
+}
+
+function getCollectionApiPayloadBody(payload: Record<string, unknown>) {
+  if (Object.prototype.hasOwnProperty.call(payload, 'body')) {
+    return payload.body
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'document')) {
+    return payload.document
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'set')) {
+    return payload.set
+  }
+  return payload
+}
+
+function formatCollectionApiResult(
+  operation: CollectionApiOperation,
+  result: unknown,
+  payload: Record<string, unknown>
+) {
+  const record = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+
+  if (operation === 'get') {
+    const list = Array.isArray(record.list) ? record.list : []
+    if (payload.findOne === true) {
+      return {
+        data: list[0] ?? null,
+      }
+    }
+
+    const total = Math.max(0, Number(record.total || 0))
+    const page = Math.max(0, Number(record.page || 0))
+    const pageSize = Math.max(1, Number(record.pageSize || list.length || 1))
+    const skip = Math.max(0, Number(record.skip || page * pageSize))
+
+    return {
+      data: list,
+      pagination: {
+        total,
+        page,
+        pageSize,
+        skip,
+        hasMore: skip + list.length < total,
+      },
+    }
+  }
+
+  if (operation === 'post') {
+    return {
+      data: serializeValue({
+        insertedId: record.insertedId,
+      }),
+    }
+  }
+
+  if (operation === 'put') {
+    return {
+      data: {
+        matchedCount: Number(record.matchedCount || 0),
+        modifiedCount: Number(record.modifiedCount || 0),
+      },
+    }
+  }
+
+  return {
+    data: {
+      matchedCount: Number(record.matchedCount || 0),
+      deletedCount: Number(record.deletedCount || 0),
+    },
+  }
+}
+
+async function recordCollectionApiCall(
+  db: Db,
+  record: Omit<CollectionApiCallRecord, 'id'>
+) {
+  const collection = await getApiCallRecordCollection(db)
+  await collection.insertOne({
+    kind: 'api_call',
+    ...record,
+  } as any)
+}
+
+export async function listCollectionApiCallRecords(input: {
+  database: string
+  collection: string
+  apiId?: string
+  limit?: number
+}): Promise<{ ok: true; items: CollectionApiCallRecord[] }> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const database = String(input.database || '').trim()
+  const collectionName = String(input.collection || '').trim()
+  if (!database || !collectionName) {
+    throw new Error('database 和 collection 不能为空')
+  }
+
+  const client = await getMongoClient()
+  const db = client.db(database)
+  const collection = await getApiCallRecordCollection(db)
+  const docs = await collection
+    .find({
+      kind: 'api_call',
+      database,
+      collection: collectionName,
+      ...(input.apiId ? { apiId: input.apiId } : {}),
+    })
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(Math.min(Math.max(Number(input.limit || 50), 1), 200))
+    .toArray()
+
+  return {
+    ok: true,
+    items: docs.map((doc) => ({
+      id: String(doc._id || ''),
+      database: String(doc.database || ''),
+      collection: String(doc.collection || ''),
+      apiId: String(doc.apiId || ''),
+      apiName: String(doc.apiName || ''),
+      operation: normalizeApiOperation(doc.operation),
+      ok: doc.ok === true,
+      status: Number(doc.status || 0),
+      message: String(doc.message || ''),
+      authMode: doc.authMode === 'header' ? 'header' : 'path-token',
+      durationMs: Math.max(0, Number(doc.durationMs || 0)),
+      createdAt: typeof doc.createdAt === 'string' ? doc.createdAt : '',
+    })),
+  }
+}
+
+export async function invokeCollectionApi(input: {
+  database: string
+  collection: string
+  operationId: string
+  operation: string
+  headers?: Headers
+  payload?: unknown
+}) {
+  const startedAt = Date.now()
+  const operation = normalizeApiOperation(input.operation)
+  const database = String(input.database || '').trim()
+  const collectionName = String(input.collection || '').trim()
+  const operationId = String(input.operationId || '').trim()
+  const client = await getMongoClient()
+  const db = client.db(database)
+  let apiConfig: CollectionApiConfig | undefined
+
+  try {
+    if (!database || !collectionName || !operationId) {
+      throw new Error('API 路径参数不完整')
+    }
+
+    const collectionConfig = await getCollectionConfig(database, collectionName)
+    apiConfig = collectionConfig.apiConfigs.find((item) => item.operationId === operationId || item.id === operationId)
+    if (!apiConfig || !apiConfig.enabled) {
+      throw new Error('API 未启用或不存在')
+    }
+    if (!apiConfig.operations.includes(operation)) {
+      throw new Error(`API 未开放 ${operation} 操作`)
+    }
+
+    assertCollectionApiAuth(apiConfig, {
+      operationId,
+      headers: input.headers,
+    })
+
+    const payload = ensurePlainObject(input.payload)
+    const scopeFilter = normalizeQuery(apiConfig.scopeFilterText || '{}')
+    const requestFilter = getCollectionApiPayloadFilter(payload)
+    const pagination = getCollectionApiPayloadPagination(payload)
+    const requestBody = getCollectionApiPayloadBody(payload)
+    let result: unknown
+    if (operation === 'get') {
+      result = await queryMongoDocuments({
+        database,
+        collection: collectionName,
+        filter: combineMongoFilters(scopeFilter, requestFilter),
+        projection: payload.projection,
+        sort: payload.sort,
+        page: Number(pagination.page ?? payload.page ?? 0),
+        pageSize: Number(pagination.pageSize ?? pagination.limit ?? payload.pageSize ?? payload.limit ?? 10),
+        findOne: pagination.findOne === true || payload.findOne === true,
+      })
+    } else if (operation === 'post') {
+      result = await insertMongoDocument({
+        database,
+        collection: collectionName,
+        document: requestBody,
+        scopeFilter,
+      })
+    } else if (operation === 'put') {
+      result = await updateMongoDocumentsByFilter({
+        database,
+        collection: collectionName,
+        filter: Object.keys(requestFilter).length ? requestFilter : payload._id ? { _id: payload._id } : {},
+        document: requestBody,
+        unsetFields: payload.unsetFields,
+        scopeFilter,
+      })
+    } else {
+      result = await deleteMongoDocumentsByFilter({
+        database,
+        collection: collectionName,
+        filter: Object.keys(requestFilter).length ? requestFilter : payload._id ? { _id: payload._id } : {},
+        scopeFilter,
+      })
+    }
+
+    await recordCollectionApiCall(db, {
+      database,
+      collection: collectionName,
+      apiId: apiConfig.id,
+      apiName: apiConfig.name,
+      operation,
+      ok: true,
+      status: 200,
+      message: 'OK',
+      authMode: apiConfig.authMode,
+      durationMs: Date.now() - startedAt,
+      createdAt: new Date().toISOString(),
+    })
+
+    return formatCollectionApiResult(operation, result, payload)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'API 调用失败'
+    await recordCollectionApiCall(db, {
+      database,
+      collection: collectionName,
+      apiId: apiConfig?.id || operationId,
+      apiName: apiConfig?.name || operationId,
+      operation,
+      ok: false,
+      status: message.includes('鉴权') || message.includes('token') ? 401 : 400,
+      message,
+      authMode: apiConfig?.authMode || 'path-token',
+      durationMs: Date.now() - startedAt,
+      createdAt: new Date().toISOString(),
+    }).catch(() => undefined)
+    throw error
+  }
+}
+
 export async function getCollectionConfig(
   database: string,
   collection: string
@@ -2049,6 +2668,7 @@ export async function saveCollectionConfig(
   const fieldSettings = normalizeFieldSettings(input.fieldSettings)
   const savedQueries = normalizeSavedQueries(input.savedQueries)
   const savedAggregations = normalizeSavedAggregations(input.savedAggregations)
+  const apiConfigs = normalizeCollectionApiConfigs(input.apiConfigs)
   const foreignRelations = buildForeignRelations(database, collection, fieldSettings)
   const indexSync = await syncCollectionIndexes(db, collection, fieldSettings)
 
@@ -2064,6 +2684,7 @@ export async function saveCollectionConfig(
         database,
         collection,
         fieldSettings: stripForeignKeysFromSettings(fieldSettings),
+        apiConfigs,
         updatedAt: now,
       },
       $setOnInsert: {
@@ -2129,6 +2750,7 @@ export async function saveCollectionConfig(
     ...(normalizeCollectionConfig(saved) || createEmptyCollectionConfig(database, collection)),
     savedQueries,
     savedAggregations,
+    apiConfigs,
     fieldSettings: mergeFieldSettingsWithRelations(
       database,
       collection,
@@ -2657,9 +3279,24 @@ export async function updateMongoDocument(
 
   const rawDocument = removeIdField(input.document)
   const unsetFields = normalizeUnsetFields(input.unsetFields)
+  const scopeFilter = normalizeQuery(input.scopeFilter)
+  const targetFilter = combineMongoFilters(scopeFilter, { _id: id as any })
   const client = await getMongoClient()
   const db = client.db(database)
   const collection = db.collection(input.collection)
+  const currentDocument = await collection.findOne(targetFilter)
+  if (!currentDocument) {
+    throw new Error('未找到要更新的文档，或文档不在 API 允许范围内')
+  }
+  const collectionConfig = await getCollectionConfig(database, input.collection)
+  const nextDocument = {
+    ...(serializeValue(currentDocument) as Record<string, unknown>),
+    ...rawDocument,
+  }
+  for (const field of unsetFields) {
+    delete nextDocument[field]
+  }
+  validateDocumentWithFieldSettings(nextDocument, collectionConfig.fieldSettings)
   const updatePayload: Record<string, unknown> = {}
 
   if (Object.keys(rawDocument).length) {
@@ -2680,7 +3317,82 @@ export async function updateMongoDocument(
     }
   }
 
-  const result = await collection.updateOne({ _id: id as any }, updatePayload)
+  const result = await collection.updateOne(targetFilter, updatePayload)
+
+  return {
+    ok: true,
+    database,
+    collection: input.collection,
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+  }
+}
+
+export async function updateMongoDocumentsByFilter(
+  input: DocumentFilterMutationInput
+): Promise<DocumentMutationResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const database = input.database || config.defaultDatabase || getCollectionName(config.uri)
+  if (!database) {
+    throw new Error('database 不能为空，请在请求中指定或配置 MONGODB_DB')
+  }
+
+  if (!input.collection) {
+    throw new Error('collection 不能为空')
+  }
+
+  const requestFilter = normalizeApiFilter(input.filter)
+  if (!Object.keys(requestFilter).length) {
+    throw new Error('filter 不能为空，禁止未指定目标的更新操作')
+  }
+
+  const rawDocument = removeIdField(input.document)
+  const unsetFields = normalizeUnsetFields(input.unsetFields)
+  const updatePayload: Record<string, unknown> = {}
+
+  if (Object.keys(rawDocument).length) {
+    updatePayload.$set = rawDocument
+  }
+
+  if (unsetFields.length) {
+    updatePayload.$unset = Object.fromEntries(unsetFields.map((field) => [field, '']))
+  }
+
+  const scopeFilter = normalizeQuery(input.scopeFilter)
+  const targetFilter = combineMongoFilters(scopeFilter, requestFilter)
+  const client = await getMongoClient()
+  const db = client.db(database)
+  const collection = db.collection(input.collection)
+
+  if (!Object.keys(updatePayload).length) {
+    const matchedCount = await collection.countDocuments(targetFilter)
+    return {
+      ok: true,
+      database,
+      collection: input.collection,
+      matchedCount,
+      modifiedCount: 0,
+    }
+  }
+
+  const collectionConfig = await getCollectionConfig(database, input.collection)
+  const cursor = collection.find(targetFilter)
+  for await (const currentDocument of cursor) {
+    const nextDocument = {
+      ...(serializeValue(currentDocument) as Record<string, unknown>),
+      ...rawDocument,
+    }
+    for (const field of unsetFields) {
+      delete nextDocument[field]
+    }
+    validateDocumentWithFieldSettings(nextDocument, collectionConfig.fieldSettings)
+  }
+
+  const result = await collection.updateMany(targetFilter, updatePayload)
 
   return {
     ok: true,
@@ -2716,13 +3428,52 @@ export async function deleteMongoDocument(
   const client = await getMongoClient()
   const db = client.db(database)
   const collection = db.collection(input.collection)
-  const result = await collection.deleteOne({ _id: id as any })
+  const scopeFilter = normalizeQuery(input.scopeFilter)
+  const result = await collection.deleteOne(combineMongoFilters(scopeFilter, { _id: id as any }))
 
   return {
     ok: true,
     database,
     collection: input.collection,
     matchedCount: result.deletedCount ? 1 : 0,
+    modifiedCount: 0,
+    deletedCount: result.deletedCount,
+  }
+}
+
+export async function deleteMongoDocumentsByFilter(
+  input: DocumentFilterMutationInput
+): Promise<DocumentMutationResult> {
+  const config = readConfig()
+  if (!config.uri) {
+    throw new Error('MONGODB_URI 未配置')
+  }
+
+  const database = input.database || config.defaultDatabase || getCollectionName(config.uri)
+  if (!database) {
+    throw new Error('database 不能为空，请在请求中指定或配置 MONGODB_DB')
+  }
+
+  if (!input.collection) {
+    throw new Error('collection 不能为空')
+  }
+
+  const requestFilter = normalizeApiFilter(input.filter)
+  if (!Object.keys(requestFilter).length) {
+    throw new Error('filter 不能为空，禁止未指定目标的删除操作')
+  }
+
+  const client = await getMongoClient()
+  const db = client.db(database)
+  const collection = db.collection(input.collection)
+  const scopeFilter = normalizeQuery(input.scopeFilter)
+  const result = await collection.deleteMany(combineMongoFilters(scopeFilter, requestFilter))
+
+  return {
+    ok: true,
+    database,
+    collection: input.collection,
+    matchedCount: result.deletedCount,
     modifiedCount: 0,
     deletedCount: result.deletedCount,
   }
@@ -2745,9 +3496,19 @@ export async function insertMongoDocument(
     throw new Error('collection 不能为空')
   }
 
-  const rawDocument = normalizeInsertDocument(input.document)
+  const scopeFilter = normalizeQuery(input.scopeFilter)
+  const rawDocument = normalizeInsertDocument(
+    Object.keys(scopeFilter).length
+      ? mergeSimpleScopeIntoDocument(removeIdField(input.document), scopeFilter)
+      : input.document
+  )
+  if (Object.keys(scopeFilter).length && !documentMatchesSimpleScope(rawDocument, scopeFilter)) {
+    throw new Error('新增文档不在 API 允许范围内')
+  }
   const client = await getMongoClient()
   const db = client.db(database)
+  const collectionConfig = await getCollectionConfig(database, input.collection)
+  validateDocumentWithFieldSettings(rawDocument, collectionConfig.fieldSettings)
   const collection = db.collection(input.collection)
   const result = await collection.insertOne(rawDocument as any)
 
