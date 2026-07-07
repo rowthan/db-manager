@@ -1,7 +1,7 @@
 'use client'
 
 import type { Dispatch, SetStateAction } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   BarChartIcon,
@@ -18,6 +18,7 @@ import {
 import type { MongoMeta } from './db-page/types'
 
 const DEFAULT_SLOT_COUNT = 8
+const AUTO_REFRESH_MIN_INTERVAL_MS = 5000
 
 type DashboardSourceKind = 'queryValue' | 'queryCount' | 'aggregateValue'
 type DashboardValueType = 'text' | 'number' | 'currency' | 'percent' | 'json'
@@ -151,6 +152,7 @@ export default function DashboardPageClient() {
   const [draggingSlotIndex, setDraggingSlotIndex] = useState<number | null>(null)
   const [dragOverSlotIndex, setDragOverSlotIndex] = useState<number | null>(null)
   const [widgetStates, setWidgetStates] = useState<Record<string, WidgetRuntimeState>>({})
+  const lastAutoRefreshAtRef = useRef(0)
   const [createDashboardState, setCreateDashboardState] = useState<CreateDashboardState>({
     open: false,
     title: '',
@@ -188,8 +190,39 @@ export default function DashboardPageClient() {
       return
     }
 
+    lastAutoRefreshAtRef.current = Date.now()
     void refreshDashboardValues(activeConfig.slots)
   }, [activeConfig?.updatedAt, activeConfig?.slots])
+
+  useEffect(() => {
+    if (!activeConfig?.slots?.some(Boolean)) {
+      return
+    }
+
+    function refreshWhenVisible() {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+
+      const now = Date.now()
+      if (now - lastAutoRefreshAtRef.current < AUTO_REFRESH_MIN_INTERVAL_MS) {
+        return
+      }
+
+      lastAutoRefreshAtRef.current = now
+      void refreshDashboardValues(activeConfig?.slots || [])
+    }
+
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    window.addEventListener('focus', refreshWhenVisible)
+    window.addEventListener('pageshow', refreshWhenVisible)
+
+    return () => {
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+      window.removeEventListener('focus', refreshWhenVisible)
+      window.removeEventListener('pageshow', refreshWhenVisible)
+    }
+  }, [activeConfig?.id, activeConfig?.slots])
 
   useEffect(() => {
     if (!editor.open) {
