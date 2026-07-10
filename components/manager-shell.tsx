@@ -462,7 +462,7 @@ export function ManagerShell({ children }: ManagerShellProps) {
 
   return (
     <div className="h-screen overflow-hidden bg-[hsl(var(--app-shell-bg))] text-[hsl(var(--app-panel-text))]">
-      <div className="hidden h-full min-h-0 lg:grid lg:grid-cols-[320px_minmax(0,1fr)]">
+      <div className="hidden h-full min-h-0 lg:grid lg:grid-cols-[300px_minmax(0,1fr)]">
         <aside className="flex h-full min-h-0 flex-col overflow-hidden border-r border-[hsl(var(--app-panel-border))] bg-[hsl(var(--app-sidebar-bg))]">
           {renderSidebarContent()}
         </aside>

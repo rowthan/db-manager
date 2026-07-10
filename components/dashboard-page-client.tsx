@@ -1,7 +1,7 @@
 'use client'
 
 import type { Dispatch, SetStateAction } from 'react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   BarChartIcon,
@@ -18,7 +18,9 @@ import {
 import type { MongoMeta } from './db-page/types'
 
 const DEFAULT_SLOT_COUNT = 8
-const AUTO_REFRESH_MIN_INTERVAL_MS = 5000
+const AUTO_REFRESH_MIN_INTERVAL_MS = 60 * 1000
+const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+const AUTO_REFRESH_STORAGE_PREFIX = 'dashboard-auto-refresh:'
 
 type DashboardSourceKind = 'queryValue' | 'queryCount' | 'aggregateValue'
 type DashboardValueType = 'text' | 'number' | 'currency' | 'percent' | 'json'
@@ -68,6 +70,7 @@ type WidgetRuntimeState = {
   value?: unknown
   detail?: string
   error?: string
+  refreshedAt?: number
 }
 
 type WidgetFormState = {
@@ -152,6 +155,10 @@ export default function DashboardPageClient() {
   const [draggingSlotIndex, setDraggingSlotIndex] = useState<number | null>(null)
   const [dragOverSlotIndex, setDragOverSlotIndex] = useState<number | null>(null)
   const [widgetStates, setWidgetStates] = useState<Record<string, WidgetRuntimeState>>({})
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false)
+  const [autoRefreshPreferenceLoadedFor, setAutoRefreshPreferenceLoadedFor] = useState('')
+  const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now())
+  const widgetStatesRef = useRef<Record<string, WidgetRuntimeState>>({})
   const lastAutoRefreshAtRef = useRef(0)
   const [createDashboardState, setCreateDashboardState] = useState<CreateDashboardState>({
     open: false,
@@ -180,10 +187,119 @@ export default function DashboardPageClient() {
     [activeDashboardId, dashboards]
   )
   const slots = useMemo(() => ensureSlotCount(activeConfig?.slots || []), [activeConfig?.slots])
+  const lastUpdatedAt = useMemo(() => {
+    const timestamps = Object.values(widgetStates)
+      .map((state) => state.refreshedAt || 0)
+      .filter(Boolean)
+    return timestamps.length ? Math.max(...timestamps) : 0
+  }, [widgetStates])
+
+  const refreshDashboardWidget = useCallback(
+    async (widget: DashboardWidgetConfig, options: { force?: boolean } = {}) => {
+      const current = widgetStatesRef.current[widget.id]
+      const now = Date.now()
+
+      if (current?.loading) {
+        return
+      }
+
+      if (!options.force && current?.refreshedAt && now - current.refreshedAt < AUTO_REFRESH_MIN_INTERVAL_MS) {
+        return
+      }
+
+      setWidgetStates((prev) => ({
+        ...prev,
+        [widget.id]: {
+          ...prev[widget.id],
+          loading: true,
+          error: '',
+        },
+      }))
+
+      try {
+        const nextState = await resolveWidgetValue(widget)
+        setWidgetStates((prev) => ({
+          ...prev,
+          [widget.id]: {
+            ...nextState,
+            loading: false,
+            refreshedAt: Date.now(),
+          },
+        }))
+      } catch (error) {
+        setWidgetStates((prev) => ({
+          ...prev,
+          [widget.id]: {
+            ...prev[widget.id],
+            loading: false,
+            error: error instanceof Error ? error.message : '加载卡片失败',
+            refreshedAt: Date.now(),
+          },
+        }))
+      }
+    },
+    []
+  )
+
+  const refreshDashboardValues = useCallback(
+    (targetSlots: (DashboardWidgetConfig | null)[], options: { force?: boolean } = {}) => {
+      const widgets = targetSlots.filter((item): item is DashboardWidgetConfig => Boolean(item))
+      if (!widgets.length) {
+        setWidgetStates({})
+        return
+      }
+
+      const widgetIds = new Set(widgets.map((widget) => widget.id))
+      setWidgetStates((prev) =>
+        Object.fromEntries(Object.entries(prev).filter(([widgetId]) => widgetIds.has(widgetId)))
+      )
+
+      widgets.forEach((widget) => {
+        void refreshDashboardWidget(widget, options)
+      })
+    },
+    [refreshDashboardWidget]
+  )
 
   useEffect(() => {
     void loadDashboards()
   }, [])
+
+  useEffect(() => {
+    widgetStatesRef.current = widgetStates
+  }, [widgetStates])
+
+  useEffect(() => {
+    if (!activeConfig?.id) {
+      return
+    }
+
+    const storageKey = `${AUTO_REFRESH_STORAGE_PREFIX}${activeConfig.id}`
+    const storedValue = window.localStorage.getItem(storageKey)
+    setAutoRefreshEnabled(storedValue === 'true')
+    setAutoRefreshPreferenceLoadedFor(activeConfig.id)
+  }, [activeConfig?.id])
+
+  useEffect(() => {
+    if (!activeConfig?.id || autoRefreshPreferenceLoadedFor !== activeConfig.id) {
+      return
+    }
+
+    window.localStorage.setItem(
+      `${AUTO_REFRESH_STORAGE_PREFIX}${activeConfig.id}`,
+      String(autoRefreshEnabled)
+    )
+  }, [activeConfig?.id, autoRefreshEnabled, autoRefreshPreferenceLoadedFor])
+
+  useEffect(() => {
+    if (!lastUpdatedAt) {
+      return
+    }
+
+    setRelativeTimeNow(Date.now())
+    const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), 30 * 1000)
+    return () => window.clearInterval(timer)
+  }, [lastUpdatedAt])
 
   useEffect(() => {
     if (!activeConfig?.slots?.length) {
@@ -191,8 +307,8 @@ export default function DashboardPageClient() {
     }
 
     lastAutoRefreshAtRef.current = Date.now()
-    void refreshDashboardValues(activeConfig.slots)
-  }, [activeConfig?.updatedAt, activeConfig?.slots])
+    void refreshDashboardValues(activeConfig.slots, { force: true })
+  }, [activeConfig?.updatedAt, activeConfig?.slots, refreshDashboardValues])
 
   useEffect(() => {
     if (!activeConfig?.slots?.some(Boolean)) {
@@ -210,7 +326,7 @@ export default function DashboardPageClient() {
       }
 
       lastAutoRefreshAtRef.current = now
-      void refreshDashboardValues(activeConfig?.slots || [])
+      void refreshDashboardValues(activeConfig?.slots || [], { force: false })
     }
 
     document.addEventListener('visibilitychange', refreshWhenVisible)
@@ -222,7 +338,24 @@ export default function DashboardPageClient() {
       window.removeEventListener('focus', refreshWhenVisible)
       window.removeEventListener('pageshow', refreshWhenVisible)
     }
-  }, [activeConfig?.id, activeConfig?.slots])
+  }, [activeConfig?.id, activeConfig?.slots, refreshDashboardValues])
+
+  useEffect(() => {
+    if (!autoRefreshEnabled || !activeConfig?.slots?.some(Boolean)) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+
+      lastAutoRefreshAtRef.current = Date.now()
+      void refreshDashboardValues(activeConfig.slots, { force: true })
+    }, AUTO_REFRESH_INTERVAL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [activeConfig?.id, activeConfig?.slots, autoRefreshEnabled, refreshDashboardValues])
 
   useEffect(() => {
     if (!editor.open) {
@@ -301,46 +434,6 @@ export default function DashboardPageClient() {
     } finally {
       setLoadingConfig(false)
     }
-  }
-
-  async function refreshDashboardValues(targetSlots: (DashboardWidgetConfig | null)[]) {
-    const widgets = targetSlots.filter((item): item is DashboardWidgetConfig => Boolean(item))
-    if (!widgets.length) {
-      setWidgetStates({})
-      return
-    }
-
-    setWidgetStates((prev) =>
-      Object.fromEntries(
-        widgets.map((widget) => [
-          widget.id,
-          {
-            ...prev[widget.id],
-            loading: true,
-            error: '',
-          },
-        ])
-      )
-    )
-
-    const entries = await Promise.all(
-      widgets.map(async (widget) => {
-        try {
-          const value = await resolveWidgetValue(widget)
-          return [widget.id, value] as const
-        } catch (error) {
-          return [
-            widget.id,
-            {
-              loading: false,
-              error: error instanceof Error ? error.message : '加载卡片失败',
-            },
-          ] as const
-        }
-      })
-    )
-
-    setWidgetStates(Object.fromEntries(entries))
   }
 
   async function persistConfig(nextConfig: DashboardConfig) {
@@ -964,7 +1057,23 @@ export default function DashboardPageClient() {
                 </div>
               )}
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <label className="flex h-9 items-center gap-2 rounded-lg border border-base-300 px-3 text-xs text-base-content/70">
+                  <span>自动刷新</span>
+                  <input
+                    type="checkbox"
+                    className="toggle toggle-success toggle-sm"
+                    checked={autoRefreshEnabled}
+                    onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
+                    aria-label="自动刷新"
+                  />
+                  <span className="hidden text-base-content/45 sm:inline">每 5 分钟</span>
+                </label>
+                {autoRefreshEnabled && lastUpdatedAt ? (
+                  <span className="text-xs text-base-content/50" title={new Date(lastUpdatedAt).toLocaleString()}>
+                    上次更新于{formatRelativeTime(lastUpdatedAt, relativeTimeNow)}
+                  </span>
+                ) : null}
                 {editMode ? (
                   <button
                     type="button"
@@ -980,7 +1089,7 @@ export default function DashboardPageClient() {
                 <button
                   type="button"
                   className="btn btn-outline btn-sm h-9 min-h-9 w-9 p-0"
-                  onClick={() => void refreshDashboardValues(slots)}
+                  onClick={() => void refreshDashboardValues(slots, { force: true })}
                   disabled={saving || refreshing}
                   title="刷新数据"
                   aria-label="刷新数据"
@@ -1014,6 +1123,7 @@ export default function DashboardPageClient() {
                 }
 
                 const runtimeState = widget ? widgetStates[widget.id] : undefined
+                const hasDisplayData = runtimeState ? 'value' in runtimeState || Boolean(runtimeState.detail) : false
                 const isDragging = draggingSlotIndex === index
                 const isDragTarget = dragOverSlotIndex === index && draggingSlotIndex !== null && draggingSlotIndex !== index
                 return (
@@ -1084,6 +1194,16 @@ export default function DashboardPageClient() {
                           <div className="flex shrink-0 items-center gap-1">
                             <button
                               type="button"
+                              className="btn btn-ghost btn-xs min-h-7 h-7 w-7 p-0"
+                              onClick={() => void refreshDashboardWidget(widget, { force: true })}
+                              disabled={runtimeState?.loading}
+                              title="刷新当前卡片"
+                              aria-label={`刷新 ${widget.title}`}
+                            >
+                              <ReloadIcon className={`h-3.5 w-3.5 ${runtimeState?.loading ? 'animate-spin' : ''}`} />
+                            </button>
+                            <button
+                              type="button"
                               className="btn btn-outline btn-xs min-h-7 h-7 px-2"
                               onClick={() => openWidgetQuery(widget)}
                               title="打开对应集合查询"
@@ -1107,12 +1227,12 @@ export default function DashboardPageClient() {
                         ) : null}
 
                         <div className="mt-5">
-                          {runtimeState?.loading ? (
+                          {runtimeState?.loading && !hasDisplayData ? (
                             <div className="space-y-3">
                               <div className="h-10 w-2/3 animate-pulse rounded-xl bg-base-300/70" />
                               <div className="h-4 w-1/2 animate-pulse rounded bg-base-300/60" />
                             </div>
-                          ) : runtimeState?.error ? (
+                          ) : runtimeState?.error && !hasDisplayData ? (
                             <div className="rounded-2xl border border-error/30 bg-error/10 px-3 py-3 text-sm text-error">
                               {runtimeState.error}
                             </div>
@@ -1123,8 +1243,12 @@ export default function DashboardPageClient() {
                               >
                                 {formatDisplayValue(runtimeState?.value, widget)}
                               </div>
-                              <div className="mt-3 text-xs text-base-content/50">
-                                {runtimeState?.detail || widget.emptyText || '已更新'}
+                              <div
+                                className={`mt-3 text-xs ${runtimeState?.error ? 'text-error/80' : 'text-base-content/50'}`}
+                              >
+                                {runtimeState?.error
+                                  ? `刷新失败：${runtimeState.error}`
+                                  : runtimeState?.detail || widget.emptyText || '已更新'}
                               </div>
                             </>
                           )}
@@ -1863,6 +1987,28 @@ function getValueByPath(input: unknown, path: string) {
 
     return (acc as Record<string, unknown>)[key]
   }, input)
+}
+
+function formatRelativeTime(timestamp: number, now = Date.now()) {
+  const elapsedSeconds = Math.max(0, Math.floor((now - timestamp) / 1000))
+  if (elapsedSeconds < 10) {
+    return '刚刚'
+  }
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds} 秒前`
+  }
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60)
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes} 分钟前`
+  }
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60)
+  if (elapsedHours < 24) {
+    return `${elapsedHours} 小时前`
+  }
+
+  return `${Math.floor(elapsedHours / 24)} 天前`
 }
 
 function getSizeClass(size: DashboardWidgetSize | undefined) {
