@@ -940,9 +940,9 @@ export default function DashboardPageClient() {
   const refreshing = Object.values(widgetStates).some((item) => item.loading)
 
   return (
-    <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top_left,rgba(22,163,74,0.12),transparent_28%),linear-gradient(180deg,hsl(var(--app-shell-bg)),hsl(var(--app-shell-bg)))] px-4 py-6 lg:px-8">
-      <div className="mx-auto grid max-w-7xl gap-5 md:grid-cols-[240px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="h-fit rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-4 shadow-sm md:sticky md:top-6">
+    <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top_left,rgba(22,163,74,0.12),transparent_28%),linear-gradient(180deg,hsl(var(--app-shell-bg)),hsl(var(--app-shell-bg)))] px-3 py-4 sm:px-4 lg:px-6 lg:py-6">
+      <div className="mx-auto grid max-w-7xl gap-2 md:grid-cols-[168px_minmax(0,1fr)] lg:gap-3 lg:grid-cols-[200px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)] 2xl:grid-cols-[260px_minmax(0,1fr)]">
+        <aside className="h-fit rounded-xl border border-base-300 bg-[hsl(var(--app-panel-bg))] p-2.5 shadow-sm md:sticky md:top-6">
           <div className="border-b border-base-300 pb-3">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45">Dashboard</div>
             <div className="mt-1 text-lg font-semibold">看板菜单</div>
@@ -1031,7 +1031,7 @@ export default function DashboardPageClient() {
         </aside>
 
         <section className="overflow-hidden rounded-[2rem] border border-base-300 bg-base-100 shadow-sm">
-          <div className="border-b border-base-300 bg-[linear-gradient(135deg,rgba(22,163,74,0.12),transparent_55%)] px-6 py-6">
+          <div className="border-b border-base-300 bg-[linear-gradient(135deg,rgba(22,163,74,0.12),transparent_55%)] px-3 py-4 sm:px-5 lg:px-6 lg:py-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               {editMode ? (
                 <div className="min-w-0 flex-1 space-y-3">
@@ -1115,8 +1115,8 @@ export default function DashboardPageClient() {
             ) : null}
           </div>
 
-          <div className="px-6 py-5">
-            <div className="grid auto-rows-[180px] grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="px-2.5 py-3 sm:px-5 lg:px-6 lg:py-5">
+            <div className="grid auto-rows-[180px] grid-cols-4 gap-2 sm:gap-3 lg:gap-4">
               {slots.map((widget, index) => {
                 if (!widget && !editMode) {
                   return null
@@ -1129,9 +1129,9 @@ export default function DashboardPageClient() {
                 return (
                   <div
                     key={widget?.id || `empty-${index}`}
-                    className={`group relative overflow-hidden rounded-[1.6rem] border bg-[linear-gradient(180deg,hsl(var(--app-panel-bg)),hsl(var(--app-panel-muted)))] p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
+                    className={`group relative overflow-hidden rounded-[1.6rem] border bg-[linear-gradient(180deg,hsl(var(--app-panel-bg)),hsl(var(--app-panel-muted)))] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
                       isDragTarget ? 'border-primary ring-2 ring-primary/25' : 'border-base-300'
-                    } ${isDragging ? 'opacity-50' : ''} ${editMode && widget ? 'cursor-move' : ''} ${getSizeClass(widget?.size)}`}
+                    } ${isDragging ? 'opacity-50' : ''} ${editMode && widget ? 'cursor-move' : ''} p-3 lg:p-5 ${getSizeClass(widget?.size)}`}
                     draggable={editMode && Boolean(widget)}
                     onDragStart={(event) => {
                       if (!editMode || !widget) {
@@ -1187,7 +1187,7 @@ export default function DashboardPageClient() {
                       <>
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
-                            <div className="truncate text-lg font-semibold">{widget.title}</div>
+                            <div className="truncate text-sm font-semibold lg:text-lg">{widget.title}</div>
                             <WidgetSourceMeta widget={widget} />
                           </div>
 
