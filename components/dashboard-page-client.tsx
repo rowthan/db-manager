@@ -1188,7 +1188,6 @@ export default function DashboardPageClient() {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-sm font-semibold lg:text-lg">{widget.title}</div>
-                            <WidgetSourceMeta widget={widget} />
                           </div>
 
                           <div className="flex shrink-0 items-center gap-1">
@@ -1221,6 +1220,9 @@ export default function DashboardPageClient() {
                             ) : null}
                           </div>
                         </div>
+
+                        <WidgetSourceMeta widget={widget} />
+
 
                         {widget.description ? (
                           <p className="mt-3 line-clamp-2 text-sm text-base-content/60">{widget.description}</p>
@@ -2043,11 +2045,9 @@ function WidgetSourceMeta({ widget }: { widget: DashboardWidgetConfig }) {
 
   return (
     <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-base-content/45">
-      <SourceIcon className="h-3.5 w-3.5 shrink-0" aria-label={sourceMeta[widget.sourceKind].label} />
+      {/* <SourceIcon className="h-3.5 w-3.5 shrink-0" aria-label={sourceMeta[widget.sourceKind].label} /> */}
       <span className="min-w-0 truncate">{widget.sourceName || '未命名来源'}</span>
-      <span className="h-1 w-1 shrink-0 rounded-full bg-base-content/20" aria-hidden="true" />
-      <TableIcon className="h-3.5 w-3.5 shrink-0" aria-label="集合" />
-      <span className="min-w-0 truncate font-mono lowercase">{locationLabel}</span>
+      {/* <span className="min-w-0 truncate font-mono lowercase">{locationLabel}</span> */}
     </div>
   )
 }
