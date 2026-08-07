@@ -5,7 +5,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: 'db-manager',
     short_name: 'DB Manager',
     description: 'A fast MongoDB database manager for dashboards, publishing, and mail workflows.',
-    start_url: '/db',
+    start_url: '/dashboard',
     scope: '/',
     display: 'standalone',
     background_color: '#f8fafc',
