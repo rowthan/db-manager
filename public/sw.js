@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'db-manager-v2'
+const CACHE_VERSION = 'db-manager-v3'
 const STATIC_CACHE = `${CACHE_VERSION}-static`
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`
 const STATIC_ASSETS = ['/offline.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-maskable.svg']
